@@ -1,11 +1,12 @@
 """Rapprochement bancaire - interface Tkinter (couleurs et formules de l'état Excel d'origine)."""
-import os, sys, tkinter as tk
+import os, sys, tempfile, webbrowser, tkinter as tk
 from datetime import date
-from tkinter import ttk, filedialog, messagebox
+from pathlib import Path
+from tkinter import ttk, filedialog, messagebox, simpledialog
 import core
 
 ORANGE, YELLOW, BLUE, RED, GREEN, PURPLE, GREY = "#FFC000", "#FFFF00", "#5B9BD5", "#FF0000", "#92D050", "#7030A0", "#BFBFBF"
-PT_BG, SUSP_BG = "#E2F0D9", "#FFF2CC"
+PT_BG, SUSP_BG, LOCK_BG = "#E2F0D9", "#FFF2CC", "#D0D0D0"
 FONT, BOLD = ("Arial", 10), ("Arial", 10, "bold")
 ETAPES = ["1- Opérer à toutes les saisies", "2- Imprimer les comptes aux mêmes dates (relevés + grand livre)",
           "3- Pointage minutieux", "4- Surligner les suspens", "5- Pointer les suspens des rapprochements antérieurs",
@@ -28,7 +29,7 @@ class Table(tk.Frame):
         super().__init__(master)
         tk.Label(self, text=title, bg=bg, font=BOLD, pady=3).pack(fill="x")
         box = tk.Frame(self); box.pack(fill="both", expand=True)
-        self.tree = ttk.Treeview(box, columns=("d", "o", "db", "cr"), show="headings", height=9, selectmode="none")
+        self.tree = ttk.Treeview(box, columns=("d", "o", "db", "cr"), show="headings", height=7, selectmode="none")
         for c, t, w, a in zip(("d", "o", "db", "cr"), ("Date", "Opérations", "Débit", "Crédit"), self.W, ("center", "w", "e", "e")):
             self.tree.heading(c, text=t); self.tree.column(c, width=w, anchor=a, stretch=(c == "o"))
         sb = ttk.Scrollbar(box, orient="vertical", command=self.tree.yview)
@@ -65,7 +66,13 @@ class Home(ttk.Frame):
     def __init__(self, master, app):
         super().__init__(master, padding=8)
         self.app, self._job, self._loading = app, None, False
+        self.locks = []
+        app.make_banner(self)
         self.title_lbl = tk.Label(self, font=("Arial", 14, "bold")); self.title_lbl.pack(pady=(0, 6))
+        act = ttk.Frame(self); act.pack(fill="x", pady=(0, 6))
+        ttk.Button(act, text="Imprimer l'état", command=app.print_etat).pack(side="left")
+        self.btn_val = ttk.Button(act, text="Valider le rapprochement", command=app.validate); self.btn_val.pack(side="left", padx=6)
+        self.btn_unl = ttk.Button(act, text="Déverrouiller…", command=app.unlock); self.btn_unl.pack(side="left")
         info = ttk.LabelFrame(self, text=" Informations ", padding=6); info.pack(fill="x")
         self.vars = {}
         fields = (("societe", "Société", 24), ("banque", "Code (banque)", 20), ("compte", "Compte", 18), ("numero", "N° de compte", 20),
@@ -74,11 +81,12 @@ class Home(ttk.Frame):
             r, cc = divmod(i, 4)
             ttk.Label(info, text=lab).grid(row=r, column=2 * cc, sticky="e", padx=(8, 2), pady=2)
             v = tk.StringVar(); self.vars[k] = v
-            ttk.Entry(info, textvariable=v, width=w).grid(row=r, column=2 * cc + 1, pady=2)
+            e = ttk.Entry(info, textvariable=v, width=w); e.grid(row=r, column=2 * cc + 1, pady=2); self.locks.append((e, "normal"))
             v.trace_add("write", lambda *_, k=k: self.edit_meta(k))
         ttk.Label(info, text="Solde comptabilité").grid(row=1, column=4, sticky="e", padx=(8, 2), pady=2)
         v = tk.StringVar(); self.vars["solde_compta"] = v
-        ttk.Combobox(info, textvariable=v, values=("DEBITEUR", "CREDITEUR"), width=12, state="readonly").grid(row=1, column=5, sticky="w", pady=2)
+        cb = ttk.Combobox(info, textvariable=v, values=("DEBITEUR", "CREDITEUR"), width=12, state="readonly"); cb.grid(row=1, column=5, sticky="w", pady=2)
+        self.locks.append((cb, "readonly"))
         v.trace_add("write", lambda *_: self.edit_meta("solde_compta"))
         rep = ttk.LabelFrame(self, text=" Report des soldes (1re ligne de chaque tableau) ", padding=6); rep.pack(fill="x", pady=6)
         self.rep = {}
@@ -86,8 +94,9 @@ class Home(ttk.Frame):
             ttk.Label(rep, text=lab).grid(row=0, column=3 * i, sticky="e", padx=(8, 2))
             m, s = tk.StringVar(), tk.StringVar(); self.rep[k] = (m, s)
             e = ttk.Entry(rep, textvariable=m, width=18, justify="right"); e.grid(row=0, column=3 * i + 1)
-            e.bind("<FocusOut>", lambda _e, k=k: self.fmt_rep(k))
-            ttk.Combobox(rep, textvariable=s, values=("Débit", "Crédit"), width=7, state="readonly").grid(row=0, column=3 * i + 2, padx=4)
+            e.bind("<FocusOut>", lambda _e, k=k: self.fmt_rep(k)); self.locks.append((e, "normal"))
+            cb = ttk.Combobox(rep, textvariable=s, values=("Débit", "Crédit"), width=7, state="readonly"); cb.grid(row=0, column=3 * i + 2, padx=4)
+            self.locks.append((cb, "readonly"))
             m.trace_add("write", lambda *_, k=k: self.edit_rep(k)); s.trace_add("write", lambda *_, k=k: self.edit_rep(k))
         mid = tk.Frame(self); mid.pack(fill="both", expand=True)
         self.left = Table(mid, "COMPTE BANQUE DANS NOS LIVRES", ORANGE, (BLUE, RED), GREEN, "black")
@@ -131,6 +140,13 @@ class Home(ttk.Frame):
             m.set(core.fmt_num(st["report"][k]["montant"])); s.set(st["report"][k]["sens"])
         self._loading = False; self.refresh()
 
+    def apply_lock(self):
+        lk = bool(self.app.state.get("lock"))
+        for w, normal in self.locks:
+            w.config(state="disabled" if lk else normal)
+        self.btn_val.config(state="disabled" if lk else "normal")
+        self.btn_unl.config(state="normal" if lk else "disabled")
+
     def refresh(self):
         if self._job:
             self.after_cancel(self._job)
@@ -152,26 +168,32 @@ class Ledger(ttk.Frame):
     def __init__(self, master, app):
         super().__init__(master, padding=8)
         self.app = app
+        app.make_banner(self)
         bar = ttk.Frame(self); bar.pack(fill="x")
         ttk.Button(bar, text="Importer le grand livre…", command=self.do_import).pack(side="left")
+        ttk.Button(bar, text="Modèle d'import…", command=app.export_template).pack(side="left", padx=(6, 0))
         ttk.Button(bar, text="Pointer la sélection", command=lambda: self.toggle(self.tree.selection())).pack(side="left", padx=(12, 2))
         ttk.Button(bar, text="Tout pointer", command=lambda: self.set_all(True)).pack(side="left", padx=2)
         ttk.Button(bar, text="Tout dépointer", command=lambda: self.set_all(False)).pack(side="left", padx=2)
+        ttk.Button(bar, text="Modifier la ligne…", command=self.edit).pack(side="left", padx=(12, 2))
+        ttk.Button(bar, text="Supprimer la sélection", command=self.delete_lines).pack(side="left", padx=2)
         ttk.Button(bar, text="Vider", command=self.clear).pack(side="left", padx=2)
         self.q = tk.StringVar(); self.flt = tk.StringVar(value="Tous")
-        ttk.Combobox(bar, textvariable=self.flt, values=("Tous", "Non pointés", "Pointés"), width=11, state="readonly").pack(side="right")
-        ttk.Entry(bar, textvariable=self.q, width=22).pack(side="right", padx=6); ttk.Label(bar, text="Rechercher :").pack(side="right")
+        bar2 = ttk.Frame(self); bar2.pack(fill="x", pady=(6, 0))
+        ttk.Label(bar2, text="Afficher :").pack(side="left")
+        ttk.Combobox(bar2, textvariable=self.flt, values=("Tous", "Non pointés", "Pointés"), width=11, state="readonly").pack(side="left", padx=6)
+        ttk.Label(bar2, text="Rechercher :").pack(side="left", padx=(12, 0)); ttk.Entry(bar2, textvariable=self.q, width=28).pack(side="left", padx=6)
         self.q.trace_add("write", lambda *_: self.fill()); self.flt.trace_add("write", lambda *_: self.fill())
-        ttk.Label(self, text="Cliquez sur ☐ (ou double-clic / barre d'espace) pour pointer une écriture retrouvée sur le relevé. "
-                  "Les écritures NON pointées alimentent « Compte banque dans nos livres ».", foreground="#555").pack(anchor="w", pady=4)
+        ttk.Label(self, text="Cliquez sur ☐ (ou barre d'espace) pour pointer ; double-clic sur une ligne pour la modifier. Chaque import s'ajoute à la suite des précédents. "
+                  "Les écritures NON pointées alimentent « Compte banque dans nos livres ».", foreground="#555", wraplength=1180, justify="left").pack(anchor="w", pady=4)
         box = ttk.Frame(self); box.pack(fill="both", expand=True)
-        self.tree = ttk.Treeview(box, columns=("p", "d", "o", "db", "cr"), show="headings", selectmode="extended")
-        for c, t, w, a in (("p", "Pointé", 60, "center"), ("d", "Date", 90, "center"), ("o", "Libellé / Opération", 480, "w"), ("db", "Débit", 120, "e"), ("cr", "Crédit", 120, "e")):
+        self.tree = ttk.Treeview(box, columns=("p", "d", "o", "db", "cr", "s"), show="headings", selectmode="extended")
+        for c, t, w, a in (("p", "Pointé", 60, "center"), ("d", "Date", 90, "center"), ("o", "Libellé / Opération", 480, "w"), ("db", "Débit", 120, "e"), ("cr", "Crédit", 120, "e"), ("s", "Import", 190, "w")):
             self.tree.heading(c, text=t); self.tree.column(c, width=w, anchor=a, stretch=(c == "o"))
         sb = ttk.Scrollbar(box, orient="vertical", command=self.tree.yview); self.tree.configure(yscrollcommand=sb.set)
         self.tree.pack(side="left", fill="both", expand=True); sb.pack(side="right", fill="y")
-        self.tree.tag_configure("ok", background=PT_BG); self.tree.tag_configure("susp", background=SUSP_BG)
-        self.tree.bind("<Button-1>", self.on_click); self.tree.bind("<Double-1>", self.on_dbl); self.tree.bind("<space>", lambda e: self.toggle(self.tree.selection()))
+        self.tree.tag_configure("ok", background=PT_BG); self.tree.tag_configure("susp", background=SUSP_BG); self.tree.tag_configure("lock", background=LOCK_BG)
+        self.tree.bind("<Button-1>", self.on_click); self.tree.bind("<Double-1>", self.on_dbl); self.tree.bind("<space>", lambda e: self.toggle(self.tree.selection())); self.tree.bind("<Delete>", lambda e: self.delete_lines())
         self.info = ttk.Label(self, font=BOLD); self.info.pack(anchor="w", pady=(6, 0))
 
     def on_click(self, e):
@@ -183,11 +205,48 @@ class Ledger(ttk.Frame):
     def on_dbl(self, e):
         iid = self.tree.identify_row(e.y)
         if iid and self.tree.identify_column(e.x) != "#1":
-            self.toggle([iid])
+            self.edit(iid)
+
+    def edit(self, iid=None):
+        if not self.app.guard():
+            return
+        if not isinstance(iid, str):
+            sel = self.tree.selection()
+            if len(sel) != 1:
+                messagebox.showinfo("Modifier", "Sélectionnez une seule écriture à modifier."); return
+            iid = sel[0]
+        i = int(iid); g = self.app.state["gl"][i]
+        dlg = tk.Toplevel(self); dlg.title("Modifier l'écriture"); dlg.transient(self.winfo_toplevel()); dlg.resizable(False, False)
+        v = {"date": tk.StringVar(value=g["date"]), "lib": tk.StringVar(value=g["lib"]),
+             "debit": tk.StringVar(value=core.fmt_num(g["debit"])), "credit": tk.StringVar(value=core.fmt_num(g["credit"]))}
+        f = ttk.Frame(dlg, padding=12); f.pack()
+        for r, (k, lab, w) in enumerate((("date", "Date (jj/mm/aaaa)", 14), ("lib", "Libellé", 50), ("debit", "Débit", 18), ("credit", "Crédit", 18))):
+            ttk.Label(f, text=lab).grid(row=r, column=0, sticky="e", padx=(0, 8), pady=3)
+            e = ttk.Entry(f, textvariable=v[k], width=w, justify="right" if k in ("debit", "credit") else "left"); e.grid(row=r, column=1, sticky="w", pady=3)
+            if r == 1: e.focus_set()
+
+        def ok(_e=None):
+            err = core.edit_gl_line(self.app.state, i, v["date"].get(), v["lib"].get(), core.parse_num(v["debit"].get()), core.parse_num(v["credit"].get()))
+            if err:
+                messagebox.showwarning("Modifier", err, parent=dlg); return
+            self.app.touch(); self.fill(keep=[iid]); dlg.destroy()
+        bt = ttk.Frame(f); bt.grid(row=4, column=0, columnspan=2, pady=(10, 0))
+        ttk.Button(bt, text="Enregistrer", command=ok).pack(side="left", padx=4); ttk.Button(bt, text="Annuler", command=dlg.destroy).pack(side="left", padx=4)
+        dlg.bind("<Return>", ok); dlg.bind("<Escape>", lambda _e: dlg.destroy()); dlg.grab_set()
+
+    def delete_lines(self):
+        sel = self.tree.selection()
+        if not sel or not self.app.guard():
+            return
+        if messagebox.askyesno("Supprimer", f"Supprimer {len(sel)} écriture(s) du grand livre ?"):
+            for i in sorted((int(x) for x in sel), reverse=True):
+                del self.app.state["gl"][i]
+            core.log(self.app.state, f"{len(sel)} écriture(s) du grand livre supprimée(s)")
+            self.app.touch(); self.fill()
 
     def toggle(self, iids):
         gl = self.app.state["gl"]; ids = [int(i) for i in iids]
-        if not ids:
+        if not ids or not self.app.guard():
             return
         new = not all(gl[i]["pointe"] for i in ids)
         for i in ids:
@@ -195,15 +254,19 @@ class Ledger(ttk.Frame):
         self.app.touch(); self.fill(keep=iids)
 
     def set_all(self, v):
+        if not self.app.guard():
+            return
         for g in self.app.state["gl"]:
             g["pointe"] = v
         self.app.touch(); self.fill()
 
     def clear(self):
-        if self.app.state["gl"] and messagebox.askyesno("Vider", "Supprimer toutes les écritures importées ?"):
+        if self.app.guard() and self.app.state["gl"] and messagebox.askyesno("Vider", "Supprimer toutes les écritures importées ?"):
             self.app.state["gl"] = []; self.app.touch(); self.fill()
 
     def do_import(self):
+        if not self.app.guard():
+            return
         p = filedialog.askopenfilename(title="Grand livre de la banque", filetypes=[("Excel / CSV", "*.xlsx *.xlsm *.csv *.txt"), ("Tous", "*.*")])
         if not p:
             return
@@ -213,18 +276,26 @@ class Ledger(ttk.Frame):
             messagebox.showerror("Import impossible", str(ex)); return
         if not rows:
             messagebox.showwarning("Import", "Aucune écriture trouvée. Le fichier doit contenir des colonnes Date, Libellé, Débit, Crédit."); return
-        if self.app.state["gl"] and not messagebox.askyesno("Import", "Remplacer le grand livre actuel (les pointages seront perdus) ?"):
-            return
-        self.app.state["gl"] = rows; self.app.touch(); self.fill()
+        src = os.path.basename(p)
+        for r in rows:
+            r["src"] = src
+        added, skipped = core.merge_import(self.app.state["gl"], rows)   # cumulatif : rien n'est écrasé
+        self.app.state["gl"] += added
+        core.log(self.app.state, f"Import « {src} » : {len(added)} écriture(s) ajoutée(s), {skipped} ignorée(s) (déjà présentes)")
+        self.app.touch(); self.fill()
+        messagebox.showinfo("Import terminé", f"{len(added)} écriture(s) ajoutée(s) à la suite du grand livre existant.\n"
+                            + (f"{skipped} écriture(s) identique(s) déjà présente(s) ignorée(s).\n" if skipped else "")
+                            + f"Total : {len(self.app.state['gl'])} écritures. Les pointages existants sont conservés.")
 
     def fill(self, keep=()):
         gl, flt, q = self.app.state["gl"], self.flt.get(), self.q.get().lower()
-        y = self.tree.yview()[0]; self.tree.delete(*self.tree.get_children())
+        y = self.tree.yview()[0]; self.tree.delete(*self.tree.get_children()); lk = bool(self.app.state.get("lock"))
         for i, g in enumerate(gl):
             if (flt == "Pointés" and not g["pointe"]) or (flt == "Non pointés" and g["pointe"]) or (q and q not in g["lib"].lower() and q not in g["date"]):
                 continue
-            self.tree.insert("", "end", iid=str(i), values=("☑" if g["pointe"] else "☐", g["date"], g["lib"], core.fmt_num(g["debit"]), core.fmt_num(g["credit"])),
-                             tags=("ok" if g["pointe"] else "susp",))
+            self.tree.insert("", "end", iid=str(i), values=("☑" if g["pointe"] else "☐", g["date"], g["lib"], core.fmt_num(g["debit"]), core.fmt_num(g["credit"]),
+                                    (g.get("src", "") + (" (modifiée)" if g.get("modifie") else "")).strip()),
+                             tags=(("lock" if lk else "ok") if g["pointe"] else "susp",))
         self.tree.yview_moveto(y)
         sel = [i for i in keep if self.tree.exists(i)]
         if sel:
@@ -239,6 +310,7 @@ class Bank(ttk.Frame):
     def __init__(self, master, app):
         super().__init__(master, padding=8)
         self.app, self.edit = app, None
+        app.make_banner(self)
         ttk.Label(self, text="Saisissez ligne par ligne les opérations du relevé bancaire qui ne figurent pas dans le grand livre. "
                   "Elles alimentent « Compte dans les livres de la banque ».", foreground="#555").pack(anchor="w")
         f = ttk.LabelFrame(self, text=" Nouvelle ligne du relevé ", padding=8); f.pack(fill="x", pady=8)
@@ -268,6 +340,8 @@ class Bank(ttk.Frame):
         self.tree.selection_set(()); self.e_date.focus_set()
 
     def save(self):
+        if not self.app.guard():
+            return
         d = core.parse_date(self.v["date"].get()); lib = self.v["lib"].get().strip()
         deb, cre = core.parse_num(self.v["debit"].get()), core.parse_num(self.v["credit"].get())
         if not d:
@@ -294,7 +368,7 @@ class Bank(ttk.Frame):
 
     def delete(self):
         s = self.tree.selection()
-        if s:
+        if s and self.app.guard():
             del self.app.state["bank"][int(s[0])]; self.app.touch(); self.fill(); self.reset()
 
     def fill(self):
@@ -313,26 +387,132 @@ class App(tk.Tk):
         st.configure("TNotebook.Tab", font=("Arial", 10, "bold"), padding=(14, 6)); st.configure("TLabel", font=FONT)
         st.map("TNotebook.Tab", background=[("selected", ORANGE)])
         self.state, self.path, self.dirty = core.new_state(), None, False
+        self.banners = []
         self.nb = ttk.Notebook(self); self.nb.pack(fill="both", expand=True)
         self.home, self.ledger, self.bank = Home(self.nb, self), Ledger(self.nb, self), Bank(self.nb, self)
         self.nb.add(self.home, text="Page d'accueil"); self.nb.add(self.ledger, text="Import du grand livre banque"); self.nb.add(self.bank, text="Saisie relevé bancaire non pointé")
         self.nb.bind("<<NotebookTabChanged>>", lambda e: self.home.refresh())
         m = tk.Menu(self); f = tk.Menu(m, tearoff=0); self.config(menu=m); m.add_cascade(label="Fichier", menu=f)
         for lab, cmd, acc in (("Nouveau", self.new, "<Control-n>"), ("Ouvrir…", self.open, "<Control-o>"), ("Enregistrer", self.save, "<Control-s>"),
-                              ("Enregistrer sous…", lambda: self.save(True), None), ("Exporter l'état vers Excel…", self.export, "<Control-e>")):
+                              ("Enregistrer sous…", lambda: self.save(True), None), ("Imprimer l'état…", self.print_etat, "<Control-p>"),
+                              ("Exporter l'état vers Excel…", self.export, "<Control-e>"), ("Modèle d'importation du grand livre…", self.export_template, None)):
             f.add_command(label=lab, command=cmd, accelerator=acc.replace("<Control-", "Ctrl+").strip(">").upper() if acc else None)
             if acc: self.bind(acc, lambda e, c=cmd: c())
         f.add_separator(); f.add_command(label="Quitter", command=self.on_close)
+        r = tk.Menu(m, tearoff=0); m.add_cascade(label="Rapprochement", menu=r)
+        r.add_command(label="Valider le rapprochement (verrouiller les pointages)", command=self.validate)
+        r.add_command(label="Déverrouiller (mot de passe)…", command=self.unlock)
+        r.add_separator()
+        r.add_command(label="Nouvelle période (reporter les suspens)…", command=self.new_period)
+        r.add_command(label="Journal des validations", command=self.show_journal)
         self.protocol("WM_DELETE_WINDOW", self.on_close); self.reload()
+
+    # -- verrouillage
+    def make_banner(self, page):
+        box = tk.Frame(page); box.pack(fill="x")
+        lbl = tk.Label(box, bg="#C00000", fg="white", font=BOLD, pady=4, anchor="w", padx=8)
+        self.banners.append(lbl)
+
+    @property
+    def locked(self):
+        return bool(self.state.get("lock"))
+
+    def guard(self):
+        if self.locked:
+            messagebox.showinfo("Période verrouillée", f"Le rapprochement au {self.state['lock']['au']} est validé : pointages et saisies sont verrouillés.\n"
+                                "Utilisez « Rapprochement > Déverrouiller » (mot de passe) pour le modifier.")
+            return False
+        return True
+
+    def refresh_lock(self):
+        lk = self.state.get("lock")
+        for b in self.banners:
+            if lk:
+                b.config(text=f"VERROUILLÉ — rapprochement au {lk['au']} validé le {lk['date']}. Déverrouillage par mot de passe (menu Rapprochement).")
+                b.pack(fill="x", pady=(0, 6))
+            else:
+                b.pack_forget()
+        self.home.apply_lock(); self.ledger.fill()
+        self.title_extra = " [VERROUILLÉ]" if lk else ""; self.update_title()
+
+    def ask_new_password(self):
+        p1 = simpledialog.askstring("Mot de passe", "Définissez le mot de passe de déverrouillage (4 caractères minimum) :", show="*", parent=self)
+        if not p1:
+            return None
+        if len(p1) < 4:
+            messagebox.showwarning("Mot de passe", "Mot de passe trop court (4 caractères minimum)."); return None
+        if simpledialog.askstring("Mot de passe", "Confirmez le mot de passe :", show="*", parent=self) != p1:
+            messagebox.showwarning("Mot de passe", "Les deux saisies ne correspondent pas."); return None
+        return p1
+
+    def validate(self):
+        if self.locked:
+            messagebox.showinfo("Validation", "Ce rapprochement est déjà validé."); return
+        ok, msg = core.validate_check(self.state)
+        if not ok:
+            messagebox.showwarning("Validation impossible", msg); return
+        au = self.state["meta"]["au"]
+        if not messagebox.askyesno("Valider le rapprochement", f"Valider le rapprochement au {au} ?\n\nTous les pointages, les saisies du relevé et l'en-tête seront "
+                                   "verrouillés. Seul le mot de passe permettra de les rouvrir."):
+            return
+        if not self.state.get("pwd"):
+            p = self.ask_new_password()
+            if not p:
+                return
+            core.set_password(self.state, p)
+        core.lock_state(self.state); self.touch(); self.refresh_lock()
+        messagebox.showinfo("Validé", "Rapprochement validé et verrouillé. Enregistrez maintenant le dossier.")
+        self.save()
+
+    def unlock(self):
+        if not self.locked:
+            return
+        p = simpledialog.askstring("Déverrouiller", "Mot de passe :", show="*", parent=self)
+        if p is None:
+            return
+        if not core.check_password(self.state, p):
+            messagebox.showerror("Déverrouiller", "Mot de passe incorrect."); return
+        core.unlock_state(self.state); self.touch(); self.refresh_lock()
+        messagebox.showinfo("Déverrouillé", "Les pointages et saisies sont de nouveau modifiables. Revalidez le rapprochement une fois terminé.")
+
+    def new_period(self):
+        if not self.locked:
+            messagebox.showinfo("Nouvelle période", "Validez d'abord le rapprochement de la période en cours."); return
+        if not self.confirm():
+            return
+        n = core.next_period(self.state)
+        self.state, self.path = n, None; self.reload()
+        messagebox.showinfo("Nouvelle période", f"Nouveau dossier créé.\nReportés : {len(n['gl'])} écriture(s) du grand livre non pointée(s) et {len(n['bank'])} ligne(s) du relevé.\n"
+                            "Saisissez la date, les soldes reportés, importez le grand livre du nouveau mois (option « ajouter à la suite ») et supprimez les lignes devenues sans objet.")
+
+    def show_journal(self):
+        messagebox.showinfo("Journal des validations", "\n".join(self.state.get("journal", [])) or "Aucune validation enregistrée.")
+
+    # -- impression / modèle
+    def print_etat(self):
+        try:
+            f = tempfile.NamedTemporaryFile("w", suffix=".html", prefix="rapprochement_", delete=False, encoding="utf-8")
+            f.write(core.build_print_html(self.state)); f.close()
+            webbrowser.open(Path(f.name).as_uri())
+        except Exception as ex:
+            messagebox.showerror("Impression impossible", str(ex))
+
+    def export_template(self):
+        p = filedialog.asksaveasfilename(defaultextension=".xlsx", filetypes=[("Excel", "*.xlsx")], initialfile="modele_import_grand_livre.xlsx")
+        if p:
+            try:
+                core.export_template(p); messagebox.showinfo("Modèle d'importation", "Modèle enregistré :\n" + p)
+            except Exception as ex:
+                messagebox.showerror("Modèle", str(ex))
 
     def touch(self):
         self.dirty = True; self.update_title(); self.home.refresh()
 
     def update_title(self):
-        self.title(f"Rapprochement bancaire — {os.path.basename(self.path) if self.path else 'Sans titre'}{' *' if self.dirty else ''}")
+        self.title(f"Rapprochement bancaire — {os.path.basename(self.path) if self.path else 'Sans titre'}{' *' if self.dirty else ''}{getattr(self, 'title_extra', '')}")
 
     def reload(self):
-        self.home.load(); self.ledger.fill(); self.bank.fill(); self.bank.reset(); self.dirty = False; self.update_title()
+        self.home.load(); self.ledger.fill(); self.bank.fill(); self.bank.reset(); self.refresh_lock(); self.dirty = False; self.update_title()
 
     def confirm(self):
         if not self.dirty:

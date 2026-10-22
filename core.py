@@ -1,5 +1,5 @@
 """Moteur de calcul, import du grand livre et export Excel (mêmes formules que le fichier d'origine)."""
-import csv, json, re, unicodedata
+import csv, hashlib, hmac, json, os, re, unicodedata
 from datetime import datetime, date
 
 MOIS = ["JAN", "FEV", "MARS", "AVR", "MAI", "JUIN", "JUIL", "AOUT", "SEPT", "OCT", "NOV", "DEC"]
@@ -56,9 +56,12 @@ def new_state():
         "meta": {"societe": "", "banque": "", "compte": "", "numero": "",
                  "mois": f"{MOIS[t.month - 1]} {t.year}", "au": t.strftime("%d/%m/%Y"),
                  "solde_compta": "DEBITEUR"},
-        "report": {"compta": {"montant": 0.0, "sens": "Crédit"}, "banque": {"montant": 0.0, "sens": "Crédit"}},
+        "report": {"compta": {"montant": 0.0, "sens": "Débit"}, "banque": {"montant": 0.0, "sens": "Crédit"}},
         "gl": [],    # {date, lib, debit, credit, pointe}
         "bank": [],  # {date, lib, debit, credit}
+        "lock": None,    # {au, mois, date} quand le rapprochement est validé
+        "pwd": None,     # {salt, hash} du mot de passe de déverrouillage
+        "journal": [],
     }
 
 
@@ -152,6 +155,7 @@ def load_project(path):
     for k in ("compta", "banque"):
         base["report"][k].update(s.get("report", {}).get(k, {}))
     base["gl"], base["bank"] = s.get("gl", []), s.get("bank", [])
+    base["lock"], base["pwd"], base["journal"] = s.get("lock"), s.get("pwd"), s.get("journal", [])
     return base
 
 
@@ -233,3 +237,201 @@ def export_xlsx(state, path):
     ws.page_setup.orientation, ws.page_setup.fitToWidth, ws.page_setup.fitToHeight = "landscape", 1, 0
     ws.sheet_properties.pageSetUpPr.fitToPage = True
     wb.save(path)
+
+
+# ---------------------------------------------------------------- validation / verrouillage
+def log(state, msg):
+    state.setdefault("journal", []).append(f"{datetime.now():%d/%m/%Y %H:%M} — {msg}")
+
+
+def _hash(pwd, salt):
+    return hashlib.pbkdf2_hmac("sha256", pwd.encode("utf-8"), bytes.fromhex(salt), 200_000).hex()
+
+
+def set_password(state, pwd):
+    salt = os.urandom(16).hex()
+    state["pwd"] = {"salt": salt, "hash": _hash(pwd, salt)}
+
+
+def check_password(state, pwd):
+    p = state.get("pwd")
+    return bool(p) and hmac.compare_digest(_hash(pwd, p["salt"]), p["hash"])
+
+
+def validate_check(state):
+    """Un rapprochement ne peut être validé que si la date est valide et les 4 contrôles sont à OK."""
+    if not parse_date(state["meta"]["au"]):
+        return False, "La date « Au » de l'état est invalide (format jj/mm/aaaa)."
+    c = calc(left_rows(state), right_rows(state))
+    bad = [(k, c[k]) for k in ("E54", "E55", "E56", "E57") if c[k] != "OK"]
+    if bad:
+        return False, ("Les contrôles obligatoires ne sont pas tous à « OK » : le rapprochement n'est pas équilibré.\n\n"
+                       + "\n".join(f"{k} : {fmt_num(v, False)}" for k, v in bad))
+    return True, ""
+
+
+def lock_state(state):
+    m = state["meta"]
+    state["lock"] = {"au": m["au"], "mois": m["mois"], "date": datetime.now().strftime("%d/%m/%Y %H:%M")}
+    log(state, f"Rapprochement validé au {m['au']} — pointages et saisies verrouillés")
+
+
+def unlock_state(state):
+    au = (state.get("lock") or {}).get("au", "")
+    state["lock"] = None
+    log(state, f"Déverrouillage (mot de passe) du rapprochement au {au}")
+
+
+def next_period(state):
+    """Nouveau dossier : mêmes références, suspens non pointés et lignes du relevé reportés."""
+    n = new_state()
+    for k in ("societe", "banque", "compte", "numero", "solde_compta"):
+        n["meta"][k] = state["meta"][k]
+    n["gl"] = [dict(g, pointe=False) for g in state["gl"] if not g.get("pointe")]
+    n["bank"] = [dict(b) for b in state["bank"]]
+    n["pwd"] = state.get("pwd")
+    log(n, f"Nouvelle période créée depuis le rapprochement au {state['meta']['au']}")
+    return n
+
+
+# ---------------------------------------------------------------- modèle d'importation
+def export_template(path):
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+    wb = Workbook()
+    hdr = ["Date", "N° pièce", "Libellé", "Débit", "Crédit"]
+
+    def head(ws):
+        ws.append(hdr)
+        for c in ws[1]:
+            c.font, c.fill, c.alignment = Font(name="Arial", bold=True), PatternFill("solid", fgColor="FFC000"), Alignment(horizontal="center")
+        for col, w in zip("ABCDE", (13, 16, 55, 18, 18)):
+            ws.column_dimensions[col].width = w
+        ws.freeze_panes = "A2"
+
+    ws = wb.active
+    ws.title = "Grand livre"
+    head(ws)
+    for r in range(2, 1002):
+        ws[f"A{r}"].number_format = "dd/mm/yyyy"
+        ws[f"D{r}"].number_format = ws[f"E{r}"].number_format = "#,##0"
+    ex = wb.create_sheet("Exemple")
+    head(ex)
+    for d, p, l, db, cr in ((datetime(2025, 12, 3), "CHQ0001", "REGLEMENT FACTURE FOURNISSEUR", None, 850000),
+                            (datetime(2025, 12, 8), "REM0012", "REMISE CHEQUES CLIENTS", 2500000, None),
+                            (datetime(2025, 12, 15), "VIR0005", "VIREMENT SALAIRES", None, 4100000),
+                            (datetime(2025, 12, 29), "AGIOS", "AGIOS ET FRAIS DE TENUE DE COMPTE", None, 40000)):
+        ex.append([d, p, l, db, cr])
+    for r in range(2, 6):
+        ex[f"A{r}"].number_format = "dd/mm/yyyy"
+        ex[f"D{r}"].number_format = ex[f"E{r}"].number_format = "#,##0"
+    ins = wb.create_sheet("Instructions")
+    ins.column_dimensions["A"].width = 110
+    for line in ("MODÈLE D'IMPORTATION DU GRAND LIVRE BANQUE", "",
+                 "1. Éditez le grand livre du compte banque (521 SYSCOHADA / 512 PCG) dans votre logiciel comptable.",
+                 "2. Copiez les écritures dans la feuille « Grand livre », sous la ligne d'en-têtes (seule cette 1re feuille est importée).",
+                 "3. Colonnes : Date (jj/mm/aaaa), N° pièce (facultatif), Libellé, Débit, Crédit. Un seul montant par ligne.",
+                 "4. Ne copiez pas les lignes de total, de solde ou de report (le report se saisit sur la page d'accueil).",
+                 "5. Gardez les en-têtes sur la première ligne. Un fichier .csv avec les mêmes colonnes est aussi accepté.",
+                 "6. Dans le logiciel : page « Import du grand livre banque » > « Importer le grand livre… », puis pointez chaque écriture.",
+                 "", "La feuille « Exemple » montre le format attendu ; elle n'est pas importée."):
+        ins.append([line])
+    ins["A1"].font = Font(name="Arial", bold=True, size=13)
+    wb.save(path)
+
+
+# ---------------------------------------------------------------- impression
+def build_print_html(state):
+    from html import escape as e
+    m = state["meta"]
+    L, R = left_rows(state), right_rows(state)
+    c = calc(L, R)
+
+    def rows(lst):
+        return "".join(f"<tr{' class=rep' if i == 0 else ''}><td class=c>{e(d)}</td><td>{e(lib)}</td>"
+                       f"<td class=n>{fmt_num(db)}</td><td class=n>{fmt_num(cr)}</td></tr>" for i, (d, lib, db, cr) in enumerate(lst))
+
+    def table(title, bg, lst, a, b, sol, tot, tot_fg):
+        return (f"<div class=half><div class=th style='background:{bg}'>{e(title)}</div><table>"
+                "<tr><th class=c>Date</th><th>Opérations</th><th class=n>Débit</th><th class=n>Crédit</th></tr>"
+                f"{rows(lst)}"
+                f"<tr class=sub><td colspan=2>SOUS TOTAUX</td><td class=n>{fmt_num(c[a + '51'], False)}</td><td class=n>{fmt_num(c[b + '51'], False)}</td></tr>"
+                f"<tr class=sub><td colspan=2>SOLDE RAPPROCHE</td><td class=n style='background:{sol[0]};color:#fff'>{fmt_num(c[a + '52'], False)}</td>"
+                f"<td class=n style='background:{sol[1]};color:#fff'>{fmt_num(c[b + '52'], False)}</td></tr>"
+                f"<tr class=sub><td colspan=2>TOTAUX</td><td class=n style='background:{tot};color:{tot_fg}'>{fmt_num(c[a + '53'], False)}</td>"
+                f"<td class=n style='background:{tot};color:{tot_fg}'>{fmt_num(c[b + '53'], False)}</td></tr></table></div>")
+
+    ctl = "".join(f"<tr><td>{lab}</td><td class=n style='color:{col};font-weight:bold'>{'OK' if c[k] == 'OK' else fmt_num(c[k], False)}</td></tr>"
+                  for k, col, lab in (("E54", "#FF0000", "Solde rapproché Crédit (nos livres) − Débit (banque)"),
+                                      ("E55", "#5B9BD5", "Solde rapproché Débit (nos livres) − Crédit (banque)"),
+                                      ("E56", "#5E9E2A", "Totaux nos livres : Débit − Crédit"),
+                                      ("E57", "#7030A0", "Totaux banque : Débit − Crédit")))
+    lk = state.get("lock")
+    status = (f"<p class=ok>RAPPROCHEMENT VALIDÉ le {e(lk['date'])} (période au {e(lk['au'])}) — pointages verrouillés</p>" if lk
+              else "<p class=draft>Rapprochement en cours — non validé</p>")
+    left = table("COMPTE BANQUE DANS NOS LIVRES", "#FFC000", L, "D", "E", ("#5B9BD5", "#FF0000"), "#92D050", "#000")
+    right = table(f"COMPTE {m['compte'].upper()} DANS LES LIVRES DE LA BANQUE", "#FFFF00", R, "H", "I", ("#FF0000", "#5B9BD5"), "#7030A0", "#fff")
+    return f"""<!DOCTYPE html><html lang="fr"><head><meta charset="utf-8"><title>Rapprochement bancaire au {e(m['au'])}</title>
+<style>
+@page {{ size: A4 landscape; margin: 10mm; }}
+* {{ -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
+body {{ font-family: Arial, sans-serif; font-size: 10pt; margin: 0; }}
+h1 {{ text-align: center; font-size: 15pt; margin: 4px 0 8px; }}
+td.l {{ border: 0; vertical-align: top; padding: 0 4px; }} table.info td {{ border: 0; font-weight: bold; padding: 2px 14px 6px 0; }}
+.th {{ text-align: center; font-weight: bold; padding: 4px; border: 1px solid #000; }}
+table {{ border-collapse: collapse; width: 100%; }}
+td, th {{ border: 1px solid #000; padding: 2px 5px; font-size: 9pt; }} th {{ background: #eee; }}
+.n {{ text-align: right; white-space: nowrap; }} .c {{ text-align: center; white-space: nowrap; }}
+tr.rep td, tr.sub td {{ font-weight: bold; }}
+.ctl th {{ background: #BFBFBF; font-size: 11pt; }} table.sign td {{ height: 80px; vertical-align: top; font-weight: bold; width: 33%; }}
+.ok {{ color: #1e7b1e; font-weight: bold; text-align: center; }} .draft {{ color: #a00; font-weight: bold; text-align: center; }}
+</style></head><body onload="window.print()">
+<h1>RAPPROCHEMENT BANCAIRE AU …{e(m['au'])}…</h1>
+<table class="info"><tr><td>SOCIETE : {e(m['societe'])}</td><td>CODE : {e(m['banque'])}</td><td>COMPTE : {e(m['compte'])}</td>
+<td>COMPTE N° : {e(m['numero'])}</td><td>MOIS : {e(m['mois'])}</td><td>SOLDE COMPTABILITE : {e(m['solde_compta'])}</td></tr></table>
+<table><tr><td class="l" width="50%">{left}</td><td class="l" width="50%">{right}</td></tr></table>
+<table style="margin-top:10px"><tr><td class="l" width="46%"><table class="ctl"><tr><th colspan=2>CONTROLES OBLIGATOIRES</th></tr>{ctl}</table></td>
+<td class="l"><table class="sign"><tr><td>Établi par :<br>Date :</td><td>Vérifié par :<br>Date :</td><td>Approuvé par :<br>Date :</td></tr></table></td></tr></table>
+{status}
+</body></html>"""
+
+
+# ---------------------------------------------------------------- import cumulatif / modification
+def _gl_key(g):
+    return (g["date"], g["lib"].strip().lower(), round(g["debit"], 2), round(g["credit"], 2))
+
+
+def merge_import(existing, new):
+    """Ajoute `new` à la suite de `existing` sans rien écraser.
+    Une écriture strictement identique (date, libellé, montants) déjà présente est ignorée,
+    en tenant compte du nombre d'occurrences (deux chèques identiques le même jour restent possibles).
+    Retourne (lignes_à_ajouter, nombre_ignoré)."""
+    from collections import Counter
+    have = Counter(_gl_key(g) for g in existing)
+    added, skipped = [], 0
+    for g in new:
+        k = _gl_key(g)
+        if have[k] > 0:
+            have[k] -= 1
+            skipped += 1
+        else:
+            added.append(g)
+    return added, skipped
+
+
+def edit_gl_line(state, i, date_s, lib, debit, credit):
+    """Modifie une écriture du grand livre. Retourne un message d'erreur, ou None si OK."""
+    d = parse_date(date_s)
+    if not d:
+        return "Date invalide (format jj/mm/aaaa)."
+    if debit < 0 or credit < 0:
+        return "Les montants doivent être positifs."
+    if debit == 0 and credit == 0:
+        return "Saisissez un montant au débit ou au crédit."
+    if debit and credit:
+        return "Un seul montant par ligne : débit OU crédit."
+    g = state["gl"][i]
+    old = f"{g['date']} | {g['lib']} | D {fmt_num(g['debit'], False)} | C {fmt_num(g['credit'], False)}"
+    g.update(date=d, lib=lib.strip(), debit=debit, credit=credit, modifie=True)
+    log(state, f"Écriture modifiée : {old}  →  {d} | {lib.strip()} | D {fmt_num(debit, False)} | C {fmt_num(credit, False)}")
+    return None
