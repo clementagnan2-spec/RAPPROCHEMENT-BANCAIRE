@@ -567,12 +567,18 @@ class App(tk.Tk):
             self.validate()
             if not self.locked:
                 return
-        pend = core.unvalidated(self.project)
+        pend = [i for i, x in enumerate(self.project["accounts"]) if not x.get("lock")]
         if pend:
-            messagebox.showwarning("Nouveau rapprochement", "Ces banques ne sont pas encore validées :\n\n• " + "\n• ".join(pend)
-                                   + "\n\nChoisissez chaque banque dans la liste « Banque / compte », validez son rapprochement, "
-                                   "puis cliquez de nouveau sur « Nouveau ».")
-            return
+            noms = "\n• ".join(core.account_label(self.project["accounts"][i], i) for i in pend)
+            if not messagebox.askyesno("Nouveau rapprochement", "Ces banques ne sont pas encore validées :\n\n• " + noms
+                                       + "\n\nLe rapprochement suivant exige que toutes les banques soient validées.\n"
+                                       "Voulez-vous les valider maintenant, une par une ?"):
+                return
+            for i in pend:
+                self.project["cur"] = i; self.reload()
+                self.validate()
+                if not self.locked:      # validation impossible ou annulée : on reste sur cette banque
+                    return
         self.new_period()
 
     def new_period(self):
