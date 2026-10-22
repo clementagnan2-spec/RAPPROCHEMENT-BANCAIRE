@@ -418,11 +418,15 @@ class App(tk.Tk):
         bar = ttk.Frame(self, padding=(8, 6)); bar.pack(fill="x")
         ttk.Label(bar, text="Banque / compte :", font=BOLD).pack(side="left")
         self.acc_var = tk.StringVar()
-        self.acc_cb = ttk.Combobox(bar, textvariable=self.acc_var, state="readonly", width=42, font=BOLD)
+        self.acc_cb = ttk.Combobox(bar, textvariable=self.acc_var, state="readonly", width=30, font=BOLD)
         self.acc_cb.pack(side="left", padx=6); self.acc_cb.bind("<<ComboboxSelected>>", self.on_pick_account)
         ttk.Button(bar, text="+ Ajouter une banque", command=self.add_account).pack(side="left", padx=2)
         ttk.Button(bar, text="Supprimer cette banque", command=self.remove_account).pack(side="left", padx=2)
         ttk.Button(bar, text="Récapitulatif…", command=self.show_summary).pack(side="left", padx=(12, 2))
+        ttk.Label(bar, text="Rapprochement :", font=BOLD).pack(side="left", padx=(16, 0))
+        self.dos_var, self._dos_ids = tk.StringVar(), []
+        self.dos_cb = ttk.Combobox(bar, textvariable=self.dos_var, state="readonly", width=30, font=BOLD)
+        self.dos_cb.pack(side="left", padx=6); self.dos_cb.bind("<<ComboboxSelected>>", self.on_pick_dossier)
         self.nb = ttk.Notebook(self); self.nb.pack(fill="both", expand=True)
         self.home, self.ledger, self.bank = Home(self.nb, self), Ledger(self.nb, self), Bank(self.nb, self)
         self.nb.add(self.home, text="Page d'accueil"); self.nb.add(self.ledger, text="Import du grand livre banque"); self.nb.add(self.bank, text="Saisie relevé bancaire non pointé")
@@ -457,6 +461,29 @@ class App(tk.Tk):
     def refresh_accounts(self):
         labels = [f"{i + 1}. {core.account_label(a, i)}" for i, a in enumerate(self.project["accounts"])]
         self.acc_cb.config(values=labels); self.acc_var.set(labels[self.project["cur"]])
+
+    def refresh_dossiers(self):
+        """Liste déroulante des rapprochements (dossiers) déjà enregistrés dans la base."""
+        try:
+            rows = core.db_list()
+        except Exception:
+            return
+        noms = [r[1] for r in rows]
+        labels = [f"{n}  #{r[0]}" if noms.count(n) > 1 else n for n, r in zip(noms, rows)]
+        self._dos_ids = [r[0] for r in rows]
+        self.dos_cb.config(values=labels)
+        self.dos_var.set(labels[self._dos_ids.index(self.pid)] if self.pid in self._dos_ids else "")
+
+    def on_pick_dossier(self, _e=None):
+        i = self.dos_cb.current()
+        if i < 0 or self._dos_ids[i] == self.pid:
+            return
+        if not self.confirm():
+            self.refresh_dossiers(); return
+        try:
+            self.project, self.pid = core.db_load(self._dos_ids[i]), self._dos_ids[i]; self.reload()
+        except Exception as ex:
+            messagebox.showerror("Ouverture impossible", str(ex)); self.refresh_dossiers()
 
     def on_pick_account(self, _e=None):
         i = self.acc_cb.current()
@@ -627,7 +654,7 @@ class App(tk.Tk):
         self.title(f"Rapprochement bancaire — {core.project_name(self.project)}{bk}{' *' if self.dirty else ''}{getattr(self, 'title_extra', '')}")
 
     def reload(self):
-        self.refresh_accounts(); self.home.load(); self.ledger.fill(); self.bank.fill(); self.bank.reset(); self.refresh_lock(); self.dirty = False; self.update_title()
+        self.refresh_dossiers(); self.refresh_accounts(); self.home.load(); self.ledger.fill(); self.bank.fill(); self.bank.reset(); self.refresh_lock(); self.dirty = False; self.update_title()
 
     def confirm(self):
         """Tout est enregistré automatiquement dans la base : on enregistre simplement avant de continuer."""
@@ -653,7 +680,7 @@ class App(tk.Tk):
             self.pid = core.db_save(self.project, self.pid)
         except Exception as ex:
             messagebox.showerror("Enregistrement impossible", f"La base de données n'a pas pu être écrite :\n{ex}"); return False
-        self.dirty = False; self.update_title(); return True
+        self.dirty = False; self.update_title(); self.refresh_dossiers(); return True
 
     def new(self):
         if self.confirm():
