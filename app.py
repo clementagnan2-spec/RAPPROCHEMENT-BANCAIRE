@@ -70,7 +70,9 @@ class Home(ttk.Frame):
         app.make_banner(self)
         self.title_lbl = tk.Label(self, font=("Arial", 14, "bold")); self.title_lbl.pack(pady=(0, 6))
         act = ttk.Frame(self); act.pack(fill="x", pady=(0, 6))
+        ttk.Button(act, text="Nouveau (rapprochement suivant)", command=app.next_rapprochement).pack(side="left", padx=(0, 6))
         ttk.Button(act, text="Imprimer l'état", command=app.print_etat).pack(side="left")
+        ttk.Button(act, text="Imprimer toutes les banques", command=lambda: app.print_etat(True)).pack(side="left", padx=(6, 0))
         self.btn_val = ttk.Button(act, text="Valider le rapprochement", command=app.validate); self.btn_val.pack(side="left", padx=6)
         self.btn_unl = ttk.Button(act, text="Déverrouiller…", command=app.unlock); self.btn_unl.pack(side="left")
         info = ttk.LabelFrame(self, text=" Informations ", padding=6); info.pack(fill="x")
@@ -121,7 +123,11 @@ class Home(ttk.Frame):
     # -- édition
     def edit_meta(self, k):
         if not self._loading:
-            self.app.state["meta"][k] = self.vars[k].get(); self.app.touch()
+            if k == "societe":      # la société est commune à tous les comptes bancaires
+                core.set_societe(self.app.project, self.vars[k].get())
+            else:
+                self.app.state["meta"][k] = self.vars[k].get()
+            self.app.touch()
 
     def edit_rep(self, k):
         if not self._loading:
@@ -323,14 +329,16 @@ class Bank(ttk.Frame):
         self.btn = ttk.Button(f, text="Ajouter", command=self.save); self.btn.grid(row=0, column=8, padx=(12, 2))
         ttk.Button(f, text="Nouveau", command=self.reset).grid(row=0, column=9)
         box = ttk.Frame(self); box.pack(fill="both", expand=True)
-        self.tree = ttk.Treeview(box, columns=("d", "o", "db", "cr"), show="headings", selectmode="browse")
+        self.tree = ttk.Treeview(box, columns=("d", "o", "db", "cr"), show="headings", selectmode="extended")
         for c, t, w, a in (("d", "Date", 90, "center"), ("o", "Opération", 520, "w"), ("db", "Débit", 130, "e"), ("cr", "Crédit", 130, "e")):
             self.tree.heading(c, text=t); self.tree.column(c, width=w, anchor=a, stretch=(c == "o"))
         sb = ttk.Scrollbar(box, orient="vertical", command=self.tree.yview); self.tree.configure(yscrollcommand=sb.set)
         self.tree.pack(side="left", fill="both", expand=True); sb.pack(side="right", fill="y")
         self.tree.bind("<<TreeviewSelect>>", self.on_select); self.tree.bind("<Delete>", lambda e: self.delete())
         bar = ttk.Frame(self); bar.pack(fill="x", pady=(6, 0))
-        ttk.Button(bar, text="Supprimer la ligne", command=self.delete).pack(side="left")
+        ttk.Button(bar, text="Supprimer la sélection", command=self.delete).pack(side="left")
+        ttk.Button(bar, text="Tout effacer", command=self.clear_all).pack(side="left", padx=6)
+        ttk.Label(bar, text="(Ctrl/Maj + clic pour sélectionner plusieurs lignes)", foreground="#555").pack(side="left", padx=6)
         self.info = ttk.Label(bar, font=BOLD); self.info.pack(side="right")
 
     def reset(self):
@@ -360,16 +368,33 @@ class Bank(ttk.Frame):
 
     def on_select(self, _e):
         s = self.tree.selection()
-        if s:
+        if len(s) == 1:
             self.edit = int(s[0]); r = self.app.state["bank"][self.edit]
             for k in self.v:
                 self.v[k].set(core.fmt_num(r[k]) if k in ("debit", "credit") else r[k])
             self.btn.config(text="Mettre à jour")
+        elif s:                      # sélection multiple : pas d'édition
+            self.edit = None; self.btn.config(text="Ajouter")
 
     def delete(self):
         s = self.tree.selection()
-        if s and self.app.guard():
-            del self.app.state["bank"][int(s[0])]; self.app.touch(); self.fill(); self.reset()
+        if not s or not self.app.guard():
+            return
+        if len(s) > 1 and not messagebox.askyesno("Supprimer", f"Supprimer les {len(s)} lignes sélectionnées ?"):
+            return
+        for i in sorted((int(x) for x in s), reverse=True):
+            del self.app.state["bank"][i]
+        core.log(self.app.state, f"{len(s)} ligne(s) du relevé supprimée(s)")
+        self.app.touch(); self.fill(); self.reset()
+
+    def clear_all(self):
+        n = len(self.app.state["bank"])
+        if not n or not self.app.guard():
+            return
+        if messagebox.askyesno("Tout effacer", f"Effacer les {n} lignes du relevé saisies pour ce rapprochement ?"):
+            self.app.state["bank"] = []
+            core.log(self.app.state, f"Toutes les lignes du relevé effacées ({n})")
+            self.app.touch(); self.fill(); self.reset()
 
     def fill(self):
         L = self.app.state["bank"]; self.tree.delete(*self.tree.get_children())
@@ -386,8 +411,16 @@ class App(tk.Tk):
         st.configure("Treeview", font=FONT, rowheight=22); st.configure("Treeview.Heading", font=("Arial", 11, "bold"))
         st.configure("TNotebook.Tab", font=("Arial", 10, "bold"), padding=(14, 6)); st.configure("TLabel", font=FONT)
         st.map("TNotebook.Tab", background=[("selected", ORANGE)])
-        self.state, self.path, self.dirty = core.new_state(), None, False
+        self.project, self.path, self.dirty = core.new_project(), None, False
         self.banners = []
+        bar = ttk.Frame(self, padding=(8, 6)); bar.pack(fill="x")
+        ttk.Label(bar, text="Banque / compte :", font=BOLD).pack(side="left")
+        self.acc_var = tk.StringVar()
+        self.acc_cb = ttk.Combobox(bar, textvariable=self.acc_var, state="readonly", width=42, font=BOLD)
+        self.acc_cb.pack(side="left", padx=6); self.acc_cb.bind("<<ComboboxSelected>>", self.on_pick_account)
+        ttk.Button(bar, text="+ Ajouter une banque", command=self.add_account).pack(side="left", padx=2)
+        ttk.Button(bar, text="Supprimer cette banque", command=self.remove_account).pack(side="left", padx=2)
+        ttk.Button(bar, text="Récapitulatif…", command=self.show_summary).pack(side="left", padx=(12, 2))
         self.nb = ttk.Notebook(self); self.nb.pack(fill="both", expand=True)
         self.home, self.ledger, self.bank = Home(self.nb, self), Ledger(self.nb, self), Bank(self.nb, self)
         self.nb.add(self.home, text="Page d'accueil"); self.nb.add(self.ledger, text="Import du grand livre banque"); self.nb.add(self.bank, text="Saisie relevé bancaire non pointé")
@@ -395,7 +428,8 @@ class App(tk.Tk):
         m = tk.Menu(self); f = tk.Menu(m, tearoff=0); self.config(menu=m); m.add_cascade(label="Fichier", menu=f)
         for lab, cmd, acc in (("Nouveau", self.new, "<Control-n>"), ("Ouvrir…", self.open, "<Control-o>"), ("Enregistrer", self.save, "<Control-s>"),
                               ("Enregistrer sous…", lambda: self.save(True), None), ("Imprimer l'état…", self.print_etat, "<Control-p>"),
-                              ("Exporter l'état vers Excel…", self.export, "<Control-e>"), ("Modèle d'importation du grand livre…", self.export_template, None)):
+                              ("Imprimer tous les états (toutes les banques)…", lambda: self.print_etat(True), None),
+                              ("Exporter l'état vers Excel (toutes les banques)…", self.export, "<Control-e>"), ("Modèle d'importation du grand livre…", self.export_template, None)):
             f.add_command(label=lab, command=cmd, accelerator=acc.replace("<Control-", "Ctrl+").strip(">").upper() if acc else None)
             if acc: self.bind(acc, lambda e, c=cmd: c())
         f.add_separator(); f.add_command(label="Quitter", command=self.on_close)
@@ -403,9 +437,53 @@ class App(tk.Tk):
         r.add_command(label="Valider le rapprochement (verrouiller les pointages)", command=self.validate)
         r.add_command(label="Déverrouiller (mot de passe)…", command=self.unlock)
         r.add_separator()
-        r.add_command(label="Nouvelle période (reporter les suspens)…", command=self.new_period)
+        r.add_command(label="Nouveau : rapprochement suivant (reporter les suspens)…", command=self.next_rapprochement)
         r.add_command(label="Journal des validations", command=self.show_journal)
+        r.add_separator()
+        r.add_command(label="Ajouter une banque…", command=self.add_account)
+        r.add_command(label="Récapitulatif des banques…", command=self.show_summary)
         self.protocol("WM_DELETE_WINDOW", self.on_close); self.reload()
+
+    # -- comptes bancaires
+    @property
+    def state(self):
+        """État de rapprochement du compte bancaire affiché."""
+        return self.project["accounts"][self.project["cur"]]
+
+    def refresh_accounts(self):
+        labels = [f"{i + 1}. {core.account_label(a, i)}" for i, a in enumerate(self.project["accounts"])]
+        self.acc_cb.config(values=labels); self.acc_var.set(labels[self.project["cur"]])
+
+    def on_pick_account(self, _e=None):
+        i = self.acc_cb.current()
+        if i >= 0 and i != self.project["cur"]:
+            d = self.dirty
+            self.project["cur"] = i; self.reload(); self.dirty = d; self.update_title()
+
+    def add_account(self):
+        nom = simpledialog.askstring("Ajouter une banque", "Code ou nom de la banque (ex. BOA, CORIS, ECOBANK) :", parent=self)
+        if nom is None:
+            return
+        core.add_account(self.project, nom)
+        self.reload(); self.dirty = True; self.update_title(); self.nb.select(self.home)
+        messagebox.showinfo("Banque ajoutée", "Nouveau compte bancaire créé.\n\nRenseignez sur la page d'accueil le compte, le N° de compte et les soldes reportés, "
+                            "puis importez le grand livre de cette banque et saisissez son relevé.\nChaque banque a son propre état de rapprochement ; "
+                            "choisissez-la dans la liste « Banque / compte » en haut.")
+
+    def remove_account(self):
+        if len(self.project["accounts"]) <= 1:
+            messagebox.showinfo("Supprimer la banque", "Il doit rester au moins un compte bancaire."); return
+        if self.locked:
+            messagebox.showinfo("Supprimer la banque", "Ce rapprochement est validé. Déverrouillez-le d'abord (menu Rapprochement)."); return
+        i = self.project["cur"]; lab = core.account_label(self.state, i)
+        if not messagebox.askyesno("Supprimer la banque", f"Supprimer définitivement le compte « {lab} » ?\n\n"
+                                   "Son grand livre, ses pointages et ses lignes de relevé seront perdus."):
+            return
+        core.remove_account(self.project, i)
+        self.reload(); self.dirty = True; self.update_title()
+
+    def show_summary(self):
+        messagebox.showinfo("Récapitulatif des banques", "\n".join(core.summary(self.project)))
 
     # -- verrouillage
     def make_banner(self, page):
@@ -455,11 +533,12 @@ class App(tk.Tk):
         if not messagebox.askyesno("Valider le rapprochement", f"Valider le rapprochement au {au} ?\n\nTous les pointages, les saisies du relevé et l'en-tête seront "
                                    "verrouillés. Seul le mot de passe permettra de les rouvrir."):
             return
+        core.share_password(self.project)
         if not self.state.get("pwd"):
             p = self.ask_new_password()
             if not p:
                 return
-            core.set_password(self.state, p)
+            core.set_password(self.state, p); core.share_password(self.project)
         core.lock_state(self.state); self.touch(); self.refresh_lock()
         messagebox.showinfo("Validé", "Rapprochement validé et verrouillé. Enregistrez maintenant le dossier.")
         self.save()
@@ -475,24 +554,45 @@ class App(tk.Tk):
         core.unlock_state(self.state); self.touch(); self.refresh_lock()
         messagebox.showinfo("Déverrouillé", "Les pointages et saisies sont de nouveau modifiables. Revalidez le rapprochement une fois terminé.")
 
-    def new_period(self):
+    def next_rapprochement(self):
+        """Bouton « Nouveau » : valide si besoin le rapprochement affiché, puis crée le suivant pour toutes les banques."""
         if not self.locked:
-            messagebox.showinfo("Nouvelle période", "Validez d'abord le rapprochement de la période en cours."); return
+            if not messagebox.askyesno("Nouveau rapprochement", "Le rapprochement en cours n'est pas validé.\n\nVoulez-vous le valider maintenant "
+                                       "(verrouillage des pointages) avant de passer au suivant ?"):
+                return
+            self.validate()
+            if not self.locked:
+                return
+        pend = core.unvalidated(self.project)
+        if pend:
+            messagebox.showwarning("Nouveau rapprochement", "Ces banques ne sont pas encore validées :\n\n• " + "\n• ".join(pend)
+                                   + "\n\nChoisissez chaque banque dans la liste « Banque / compte », validez son rapprochement, "
+                                   "puis cliquez de nouveau sur « Nouveau ».")
+            return
+        self.new_period()
+
+    def new_period(self):
+        if core.unvalidated(self.project):
+            messagebox.showinfo("Nouvelle période", "Validez d'abord le rapprochement de chaque banque."); return
         if not self.confirm():
             return
-        n = core.next_period(self.state)
-        self.state, self.path = n, None; self.reload()
-        messagebox.showinfo("Nouvelle période", f"Nouveau dossier créé.\nReportés : {len(n['gl'])} écriture(s) du grand livre non pointée(s) et {len(n['bank'])} ligne(s) du relevé.\n"
-                            "Saisissez la date, les soldes reportés, importez le grand livre du nouveau mois (option « ajouter à la suite ») et supprimez les lignes devenues sans objet.")
+        n = core.next_project(self.project)
+        self.project, self.path = n, None; self.reload()
+        detail = "\n".join(f"• {core.account_label(a, i)} : {len(a['gl'])} écriture(s) non pointée(s), {len(a['bank'])} ligne(s) du relevé"
+                           for i, a in enumerate(n["accounts"]))
+        messagebox.showinfo("Nouvelle période", f"Nouveau dossier créé pour {len(n['accounts'])} banque(s). Reportés :\n{detail}\n\n"
+                            "La date est proposée à la fin du mois suivant. Pour chaque banque : saisissez les soldes reportés, importez le grand livre "
+                            "du nouveau mois (il s'ajoute à la suite) et supprimez, dans la saisie du relevé, les lignes devenues sans objet "
+                            "(« Supprimer la sélection » ou « Tout effacer »).")
 
     def show_journal(self):
         messagebox.showinfo("Journal des validations", "\n".join(self.state.get("journal", [])) or "Aucune validation enregistrée.")
 
     # -- impression / modèle
-    def print_etat(self):
+    def print_etat(self, all_banks=False):
         try:
             f = tempfile.NamedTemporaryFile("w", suffix=".html", prefix="rapprochement_", delete=False, encoding="utf-8")
-            f.write(core.build_print_html(self.state)); f.close()
+            f.write(core.build_print_html(self.project if all_banks else self.state)); f.close()
             webbrowser.open(Path(f.name).as_uri())
         except Exception as ex:
             messagebox.showerror("Impression impossible", str(ex))
@@ -506,13 +606,14 @@ class App(tk.Tk):
                 messagebox.showerror("Modèle", str(ex))
 
     def touch(self):
-        self.dirty = True; self.update_title(); self.home.refresh()
+        self.dirty = True; self.update_title(); self.refresh_accounts(); self.home.refresh()
 
     def update_title(self):
-        self.title(f"Rapprochement bancaire — {os.path.basename(self.path) if self.path else 'Sans titre'}{' *' if self.dirty else ''}{getattr(self, 'title_extra', '')}")
+        n = len(self.project["accounts"]); bk = f" — {core.account_label(self.state, self.project['cur'])}" if n > 1 else ""
+        self.title(f"Rapprochement bancaire — {os.path.basename(self.path) if self.path else 'Sans titre'}{bk}{' *' if self.dirty else ''}{getattr(self, 'title_extra', '')}")
 
     def reload(self):
-        self.home.load(); self.ledger.fill(); self.bank.fill(); self.bank.reset(); self.refresh_lock(); self.dirty = False; self.update_title()
+        self.refresh_accounts(); self.home.load(); self.ledger.fill(); self.bank.fill(); self.bank.reset(); self.refresh_lock(); self.dirty = False; self.update_title()
 
     def confirm(self):
         if not self.dirty:
@@ -522,13 +623,13 @@ class App(tk.Tk):
 
     def new(self):
         if self.confirm():
-            self.state, self.path = core.new_state(), None; self.reload()
+            self.project, self.path = core.new_project(), None; self.reload()
 
     def open(self):
         p = filedialog.askopenfilename(filetypes=[("Rapprochement", "*.rapp"), ("Tous", "*.*")])
         if p and self.confirm():
             try:
-                self.state, self.path = core.load_project(p), p; self.reload()
+                self.project, self.path = core.load_project(p), p; self.reload()
             except Exception as ex:
                 messagebox.showerror("Ouverture impossible", str(ex))
 
@@ -538,13 +639,14 @@ class App(tk.Tk):
             p = filedialog.asksaveasfilename(defaultextension=".rapp", filetypes=[("Rapprochement", "*.rapp")])
         if not p:
             return False
-        core.save_project(self.state, p); self.path, self.dirty = p, False; self.update_title(); return True
+        core.save_project(self.project, p); self.path, self.dirty = p, False; self.update_title(); return True
 
     def export(self):
         p = filedialog.asksaveasfilename(defaultextension=".xlsx", filetypes=[("Excel", "*.xlsx")], initialfile="ETAT_DE_RAPPROCHEMENT_BANCAIRE.xlsx")
         if p:
             try:
-                core.export_xlsx(self.state, p); messagebox.showinfo("Export", "État exporté (avec les formules) :\n" + p)
+                core.export_xlsx(self.project, p); n = len(self.project["accounts"])
+                messagebox.showinfo("Export", f"État exporté (avec les formules){f' : une feuille par banque ({n})' if n > 1 else ''}\n" + p)
             except Exception as ex:
                 messagebox.showerror("Export impossible", str(ex))
 

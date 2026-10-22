@@ -1,5 +1,5 @@
 """Moteur de calcul, import du grand livre et export Excel (mêmes formules que le fichier d'origine)."""
-import csv, hashlib, hmac, json, os, re, unicodedata
+import calendar, csv, hashlib, hmac, json, os, re, unicodedata
 from datetime import datetime, date
 
 MOIS = ["JAN", "FEV", "MARS", "AVR", "MAI", "JUIN", "JUIL", "AOUT", "SEPT", "OCT", "NOV", "DEC"]
@@ -141,15 +141,14 @@ def import_grand_livre(path):
     return out
 
 
-# ---------------------------------------------------------------- fichiers projet
-def save_project(state, path):
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(state, f, ensure_ascii=False, indent=1)
+# ---------------------------------------------------------------- projet multi-banques
+# Un « projet » (.rapp) contient un état de rapprochement par compte bancaire :
+#   {"version": 2, "accounts": [état, état, ...], "cur": index du compte affiché}
+def new_project():
+    return {"version": 2, "accounts": [new_state()], "cur": 0}
 
 
-def load_project(path):
-    with open(path, "r", encoding="utf-8") as f:
-        s = json.load(f)
+def _normalize_state(s):
     base = new_state()
     base["meta"].update(s.get("meta", {}))
     for k in ("compta", "banque"):
@@ -159,13 +158,111 @@ def load_project(path):
     return base
 
 
+def save_project(project, path):
+    if "accounts" not in project:          # un état seul est enveloppé dans un projet
+        project = {"version": 2, "accounts": [project], "cur": 0}
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(project, f, ensure_ascii=False, indent=1)
+
+
+def load_project(path):
+    """Ouvre un .rapp. Les anciens fichiers (un seul compte) sont convertis automatiquement."""
+    with open(path, "r", encoding="utf-8") as f:
+        s = json.load(f)
+    accounts = [_normalize_state(a) for a in s["accounts"]] if "accounts" in s else [_normalize_state(s)]
+    if not accounts:
+        accounts = [new_state()]
+    cur = s.get("cur", 0) if isinstance(s.get("cur", 0), int) else 0
+    return {"version": 2, "accounts": accounts, "cur": min(max(cur, 0), len(accounts) - 1)}
+
+
+def account_label(state, i=0):
+    m = state["meta"]
+    name = " — ".join(x for x in (m.get("banque", "").strip(), m.get("compte", "").strip()) if x)
+    return name or f"Banque {i + 1}"
+
+
+def add_account(project, banque=""):
+    """Ajoute un compte bancaire : société, période, sens du solde et mot de passe sont repris du compte courant."""
+    ref = project["accounts"][project["cur"]]
+    n = new_state()
+    for k in ("societe", "mois", "au", "solde_compta"):
+        n["meta"][k] = ref["meta"][k]
+    n["meta"]["banque"] = banque.strip()
+    n["pwd"] = ref.get("pwd")
+    log(n, f"Compte bancaire ajouté ({banque.strip() or 'sans nom'})")
+    project["accounts"].append(n)
+    project["cur"] = len(project["accounts"]) - 1
+    return n
+
+
+def remove_account(project, i):
+    """Supprime un compte bancaire (au moins un compte doit rester). Retourne False si impossible."""
+    if len(project["accounts"]) <= 1 or not 0 <= i < len(project["accounts"]):
+        return False
+    del project["accounts"][i]
+    project["cur"] = min(project["cur"], len(project["accounts"]) - 1)
+    return True
+
+
+def share_password(project):
+    """Le mot de passe de déverrouillage est commun à tous les comptes du dossier."""
+    pw = next((a["pwd"] for a in project["accounts"] if a.get("pwd")), None)
+    if pw:
+        for a in project["accounts"]:
+            a["pwd"] = pw
+
+
+def set_societe(project, nom):
+    for a in project["accounts"]:
+        if not a.get("lock"):          # un rapprochement validé reste figé
+            a["meta"]["societe"] = nom
+
+
+def unvalidated(project):
+    """Noms des comptes dont le rapprochement n'est pas encore validé."""
+    return [account_label(a, i) for i, a in enumerate(project["accounts"]) if not a.get("lock")]
+
+
+def next_project(project):
+    """Dossier du mois suivant : chaque compte reporte ses suspens et ses lignes de relevé."""
+    return {"version": 2, "accounts": [next_period(a) for a in project["accounts"]], "cur": project["cur"]}
+
+
+def summary(project):
+    lines = []
+    for i, a in enumerate(project["accounts"]):
+        c = calc(left_rows(a), right_rows(a))
+        ok = all(c[k] == "OK" for k in ("E54", "E55", "E56", "E57"))
+        lines.append(f"{i + 1}. {account_label(a, i)} — au {a['meta']['au']} — "
+                     f"{'équilibré' if ok else 'NON équilibré'} — {'validé' if a.get('lock') else 'non validé'}")
+    return lines
+
+
 # ---------------------------------------------------------------- export Excel (avec formules)
-def export_xlsx(state, path):
+def _sheet_title(name, used):
+    t = re.sub(r"[\\/*?:\[\]]", " ", name).strip()[:28] or "Banque"
+    base, k = t, 2
+    while t.lower() in used:
+        t = f"{base[:25]} {k}"; k += 1
+    used.add(t.lower())
+    return t
+
+
+def export_xlsx(obj, path):
+    """Exporte un état (ou un projet : une feuille par compte bancaire)."""
     from openpyxl import Workbook
+    accounts = obj["accounts"] if "accounts" in obj else [obj]
+    wb, used = Workbook(), set()
+    for i, st in enumerate(accounts):
+        ws = wb.active if i == 0 else wb.create_sheet()
+        ws.title = _sheet_title(account_label(st, i) if len(accounts) > 1 else "Etat de rapprochement", used)
+        _write_sheet(ws, st)
+    wb.save(path)
+
+
+def _write_sheet(ws, state):
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Etat de rapprochement"
     ws.sheet_view.showGridLines = False
     for col, w in zip("ABCDEFGHI", (0.9, 14.7, 44.6, 15.1, 19.3, 14.7, 39.1, 19, 18.3)):
         ws.column_dimensions[col].width = w
@@ -236,7 +333,6 @@ def export_xlsx(state, path):
     ws[f"C{t + 2}"].alignment = Alignment(horizontal="center", vertical="center")
     ws.page_setup.orientation, ws.page_setup.fitToWidth, ws.page_setup.fitToHeight = "landscape", 1, 0
     ws.sheet_properties.pageSetUpPr.fitToPage = True
-    wb.save(path)
 
 
 # ---------------------------------------------------------------- validation / verrouillage
@@ -290,6 +386,13 @@ def next_period(state):
     n["gl"] = [dict(g, pointe=False) for g in state["gl"] if not g.get("pointe")]
     n["bank"] = [dict(b) for b in state["bank"]]
     n["pwd"] = state.get("pwd")
+    try:  # date proposée : fin du mois suivant
+        y, mo = map(int, parse_date(state["meta"]["au"]).split("/")[:0:-1])
+        y, mo = (y + 1, 1) if mo == 12 else (y, mo + 1)
+        n["meta"]["au"] = f"{calendar.monthrange(y, mo)[1]:02d}/{mo:02d}/{y}"
+        n["meta"]["mois"] = f"{MOIS[mo - 1]} {y}"
+    except (ValueError, IndexError):
+        pass
     log(n, f"Nouvelle période créée depuis le rapprochement au {state['meta']['au']}")
     return n
 
@@ -341,7 +444,7 @@ def export_template(path):
 
 
 # ---------------------------------------------------------------- impression
-def build_print_html(state):
+def _print_page(state):
     from html import escape as e
     m = state["meta"]
     L, R = left_rows(state), right_rows(state)
@@ -371,29 +474,41 @@ def build_print_html(state):
               else "<p class=draft>Rapprochement en cours — non validé</p>")
     left = table("COMPTE BANQUE DANS NOS LIVRES", "#FFC000", L, "D", "E", ("#5B9BD5", "#FF0000"), "#92D050", "#000")
     right = table(f"COMPTE {m['compte'].upper()} DANS LES LIVRES DE LA BANQUE", "#FFFF00", R, "H", "I", ("#FF0000", "#5B9BD5"), "#7030A0", "#fff")
-    return f"""<!DOCTYPE html><html lang="fr"><head><meta charset="utf-8"><title>Rapprochement bancaire au {e(m['au'])}</title>
-<style>
-@page {{ size: A4 landscape; margin: 10mm; }}
-* {{ -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
-body {{ font-family: Arial, sans-serif; font-size: 10pt; margin: 0; }}
-h1 {{ text-align: center; font-size: 15pt; margin: 4px 0 8px; }}
-td.l {{ border: 0; vertical-align: top; padding: 0 4px; }} table.info td {{ border: 0; font-weight: bold; padding: 2px 14px 6px 0; }}
-.th {{ text-align: center; font-weight: bold; padding: 4px; border: 1px solid #000; }}
-table {{ border-collapse: collapse; width: 100%; }}
-td, th {{ border: 1px solid #000; padding: 2px 5px; font-size: 9pt; }} th {{ background: #eee; }}
-.n {{ text-align: right; white-space: nowrap; }} .c {{ text-align: center; white-space: nowrap; }}
-tr.rep td, tr.sub td {{ font-weight: bold; }}
-.ctl th {{ background: #BFBFBF; font-size: 11pt; }} table.sign td {{ height: 80px; vertical-align: top; font-weight: bold; width: 33%; }}
-.ok {{ color: #1e7b1e; font-weight: bold; text-align: center; }} .draft {{ color: #a00; font-weight: bold; text-align: center; }}
-</style></head><body onload="window.print()">
-<h1>RAPPROCHEMENT BANCAIRE AU …{e(m['au'])}…</h1>
+    return f"""<h1>RAPPROCHEMENT BANCAIRE AU …{e(m['au'])}…</h1>
 <table class="info"><tr><td>SOCIETE : {e(m['societe'])}</td><td>CODE : {e(m['banque'])}</td><td>COMPTE : {e(m['compte'])}</td>
 <td>COMPTE N° : {e(m['numero'])}</td><td>MOIS : {e(m['mois'])}</td><td>SOLDE COMPTABILITE : {e(m['solde_compta'])}</td></tr></table>
 <table><tr><td class="l" width="50%">{left}</td><td class="l" width="50%">{right}</td></tr></table>
 <table style="margin-top:10px"><tr><td class="l" width="46%"><table class="ctl"><tr><th colspan=2>CONTROLES OBLIGATOIRES</th></tr>{ctl}</table></td>
 <td class="l"><table class="sign"><tr><td>Établi par :<br>Date :</td><td>Vérifié par :<br>Date :</td><td>Approuvé par :<br>Date :</td></tr></table></td></tr></table>
 {status}
-</body></html>"""
+"""
+
+
+_PRINT_CSS = '''
+@page { size: A4 landscape; margin: 10mm; }
+* { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+body { font-family: Arial, sans-serif; font-size: 10pt; margin: 0; }
+h1 { text-align: center; font-size: 15pt; margin: 4px 0 8px; }
+td.l { border: 0; vertical-align: top; padding: 0 4px; } table.info td { border: 0; font-weight: bold; padding: 2px 14px 6px 0; }
+.th { text-align: center; font-weight: bold; padding: 4px; border: 1px solid #000; }
+table { border-collapse: collapse; width: 100%; }
+td, th { border: 1px solid #000; padding: 2px 5px; font-size: 9pt; } th { background: #eee; }
+.n { text-align: right; white-space: nowrap; } .c { text-align: center; white-space: nowrap; }
+tr.rep td, tr.sub td { font-weight: bold; }
+.ctl th { background: #BFBFBF; font-size: 11pt; } table.sign td { height: 80px; vertical-align: top; font-weight: bold; width: 33%; }
+.ok { color: #1e7b1e; font-weight: bold; text-align: center; } .draft { color: #a00; font-weight: bold; text-align: center; }
+'''
+
+
+def build_print_html(obj):
+    """Page d'impression d'un état, ou d'un projet entier (une page A4 par compte bancaire)."""
+    from html import escape as e
+    accounts = obj["accounts"] if "accounts" in obj else [obj]
+    pages = "".join(f'<div class="pg">{_print_page(a)}</div>' for a in accounts)
+    title = e(accounts[0]["meta"]["au"]) if len(accounts) == 1 else f"{len(accounts)} comptes bancaires"
+    return (f'<!DOCTYPE html><html lang="fr"><head><meta charset="utf-8"><title>Rapprochement bancaire au {title}</title>'
+            f'<style>{_PRINT_CSS}.pg {{ page-break-after: always; }} .pg:last-child {{ page-break-after: auto; }}</style>'
+            f'</head><body onload="window.print()">{pages}</body></html>')
 
 
 # ---------------------------------------------------------------- import cumulatif / modification

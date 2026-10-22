@@ -53,9 +53,12 @@ class TestCore(unittest.TestCase):
                    {"date": "02/12/2025", "lib": "B", "debit": 0, "credit": 7, "pointe": False}]
         core.set_password(s, "pw"); core.lock_state(s)
         p = os.path.join(tempfile.mkdtemp(), "x.rapp"); core.save_project(s, p)
-        t = core.load_project(p)
+        t = core.load_project(p)["accounts"][0]      # un état seul est enveloppé dans un projet
         self.assertTrue(t["lock"]); self.assertTrue(core.check_password(t, "pw"))
         n = core.next_period(t)
+        self.assertEqual((n["meta"]["au"], n["meta"]["mois"]), ("31/01/2026", "JAN 2026"))
+        s2 = core.new_state(); s2["meta"]["au"] = "30/12/2026"; self.assertEqual(core.next_period(s2)["meta"]["au"], "31/01/2027")
+        s2["meta"]["au"] = "31/01/2026"; self.assertEqual(core.next_period(s2)["meta"]["au"], "28/02/2026")
         self.assertEqual([g["lib"] for g in n["gl"]], ["B"]); self.assertIsNone(n["lock"]); self.assertTrue(core.check_password(n, "pw"))
 
     def test_modele_et_impression(self):
@@ -88,6 +91,54 @@ class TestCore(unittest.TestCase):
         self.assertEqual((s["gl"][1]["credit"], s["gl"][1]["date"]), (55, "07/01/2026")); self.assertIn("Écriture modifiée", s["journal"][-1])
         self.assertIn("invalide", core.edit_gl_line(s, 1, "xx", "a", 0, 5))
         self.assertIn("débit OU crédit", core.edit_gl_line(s, 1, "07/01/2026", "a", 5, 5))
+
+    def test_plusieurs_banques(self):
+        import tempfile
+        from openpyxl import load_workbook
+        pr = core.new_project()
+        a = pr["accounts"][0]; a["meta"].update(societe="ACME", banque="BOA", compte="Compte courant", au="31/12/2025", mois="DEC 2025")
+        a["report"] = {"compta": {"montant": 1000, "sens": "Débit"}, "banque": {"montant": 1000, "sens": "Crédit"}}
+        a["gl"] = [{"date": "01/12/2025", "lib": "A", "debit": 5, "credit": 0, "pointe": True},
+                   {"date": "02/12/2025", "lib": "B", "debit": 0, "credit": 7, "pointe": False}]
+        core.set_password(a, "pw")
+        b = core.add_account(pr, "CORIS")                                   # 2e banque
+        self.assertEqual((len(pr["accounts"]), pr["cur"]), (2, 1))
+        self.assertEqual((b["meta"]["societe"], b["meta"]["au"], b["meta"]["banque"]), ("ACME", "31/12/2025", "CORIS"))
+        self.assertEqual(b["gl"], []); self.assertTrue(core.check_password(b, "pw"))
+        b["report"] = {"compta": {"montant": 500, "sens": "Débit"}, "banque": {"montant": 500, "sens": "Crédit"}}
+        self.assertEqual(core.account_label(a, 0), "BOA — Compte courant"); self.assertEqual(core.account_label(core.new_state(), 2), "Banque 3")
+        core.set_societe(pr, "ACME SA"); self.assertEqual((a["meta"]["societe"], b["meta"]["societe"]), ("ACME SA", "ACME SA"))
+        # indépendance des comptes
+        self.assertNotEqual(core.calc(core.left_rows(a), core.right_rows(a))["D51"], core.calc(core.left_rows(b), core.right_rows(b))["D51"])
+        self.assertEqual(core.unvalidated(pr), ["BOA — Compte courant", "CORIS"])
+        a["bank"] = [{"date": "03/12/2025", "lib": "frais", "debit": 0, "credit": 7}]
+        self.assertEqual(len(core.summary(pr)), 2)
+        core.lock_state(b); core.set_societe(pr, "X"); self.assertEqual(b["meta"]["societe"], "ACME SA")   # compte validé figé
+        # sauvegarde / réouverture
+        d = tempfile.mkdtemp(); p = os.path.join(d, "m.rapp"); core.save_project(pr, p)
+        q = core.load_project(p)
+        self.assertEqual((len(q["accounts"]), q["cur"]), (2, 1)); self.assertEqual(q["accounts"][1]["meta"]["banque"], "CORIS")
+        # période suivante : tous les comptes
+        core.lock_state(a); self.assertEqual(core.unvalidated(pr), [])
+        n = core.next_project(pr)
+        self.assertEqual([x["meta"]["au"] for x in n["accounts"]], ["31/01/2026", "31/01/2026"])
+        self.assertEqual([g["lib"] for g in n["accounts"][0]["gl"]], ["B"]); self.assertEqual(len(n["accounts"][0]["bank"]), 1)
+        self.assertTrue(all(x["lock"] is None for x in n["accounts"]))
+        # export Excel : une feuille par banque ; impression : une page par banque
+        x = os.path.join(d, "e.xlsx"); core.export_xlsx(pr, x)
+        self.assertEqual(load_workbook(x).sheetnames, ["BOA — Compte courant", "CORIS"])
+        h = core.build_print_html(pr); self.assertEqual(h.count('class="pg"'), 2); self.assertIn("CORIS", h)
+        self.assertEqual(core.build_print_html(a).count('class="pg"'), 1)
+        # suppression d'une banque (la dernière ne peut pas être supprimée)
+        self.assertTrue(core.remove_account(pr, 0)); self.assertFalse(core.remove_account(pr, 0)); self.assertEqual(pr["cur"], 0)
+
+    def test_ancien_fichier_un_seul_compte(self):
+        import tempfile, json
+        p = os.path.join(tempfile.mkdtemp(), "old.rapp")
+        old = core.new_state(); old["meta"]["banque"] = "BOA"
+        with open(p, "w", encoding="utf-8") as f: json.dump(old, f)      # ancien format, sans « accounts »
+        pr = core.load_project(p)
+        self.assertEqual((len(pr["accounts"]), pr["cur"], pr["accounts"][0]["meta"]["banque"]), (1, 0, "BOA"))
 
 
 if __name__ == "__main__":
