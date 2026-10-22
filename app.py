@@ -28,6 +28,7 @@ class Table(tk.Frame):
     def __init__(self, master, title, bg, sol, tot, tot_fg):
         super().__init__(master)
         tk.Label(self, text=title, bg=bg, font=BOLD, pady=3).pack(fill="x")
+        foot = tk.Frame(self, bd=1, relief="solid"); foot.pack(side="bottom", fill="x")   # soldes toujours visibles
         box = tk.Frame(self); box.pack(fill="both", expand=True)
         self.tree = ttk.Treeview(box, columns=("d", "o", "db", "cr"), show="headings", height=4, selectmode="none")
         for c, t, w, a in zip(("d", "o", "db", "cr"), ("Date", "Opérations", "Débit", "Crédit"), self.W, ("center", "w", "e", "e")):
@@ -36,7 +37,6 @@ class Table(tk.Frame):
         self.tree.configure(yscrollcommand=sb.set)
         self.tree.pack(side="left", fill="both", expand=True); sb.pack(side="right", fill="y")
         self.tree.tag_configure("report", font=("Arial", 10, "bold"))
-        foot = tk.Frame(self, bd=1, relief="solid"); foot.pack(fill="x")
         foot.grid_columnconfigure(0, weight=1)
         for i, w in ((1, self.W[2]), (2, self.W[3])):
             foot.grid_columnconfigure(i, minsize=w)
@@ -116,10 +116,6 @@ class Home(ttk.Frame):
             tk.Label(ctl, text=lab, font=("Arial", 9), anchor="w").grid(row=r, column=0, sticky="w", padx=6)
             l = tk.Label(ctl, font=("Arial", 11, "bold"), fg=col, width=16, anchor="e"); l.grid(row=r, column=1, padx=6)
             self.ctl[key] = l
-        st = tk.Frame(bot, bd=1, relief="solid"); st.pack(side="left", fill="both", expand=True, padx=(12, 0))
-        tk.Label(st, text="LES ETAPES DE RAPPROCHEMENT BANCAIRES", bg=ORANGE, font=BOLD).pack(fill="x")
-        for t in ETAPES:
-            tk.Label(st, text=t, font=("Arial", 9), anchor="w").pack(fill="x", padx=6)
 
     # -- édition
     def edit_meta(self, k):
