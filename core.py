@@ -1,5 +1,5 @@
 """Moteur de calcul, import du grand livre et export Excel (mêmes formules que le fichier d'origine)."""
-import calendar, csv, hashlib, hmac, json, os, re, unicodedata
+import calendar, csv, hashlib, hmac, json, os, re, sqlite3, unicodedata
 from datetime import datetime, date
 
 MOIS = ["JAN", "FEV", "MARS", "AVR", "MAI", "JUIN", "JUIL", "AOUT", "SEPT", "OCT", "NOV", "DEC"]
@@ -168,12 +168,77 @@ def save_project(project, path):
 def load_project(path):
     """Ouvre un .rapp. Les anciens fichiers (un seul compte) sont convertis automatiquement."""
     with open(path, "r", encoding="utf-8") as f:
-        s = json.load(f)
+        return _project_from_json(json.load(f))
+
+
+def _project_from_json(s):
     accounts = [_normalize_state(a) for a in s["accounts"]] if "accounts" in s else [_normalize_state(s)]
     if not accounts:
         accounts = [new_state()]
     cur = s.get("cur", 0) if isinstance(s.get("cur", 0), int) else 0
     return {"version": 2, "accounts": accounts, "cur": min(max(cur, 0), len(accounts) - 1)}
+
+
+# ---------------------------------------------------------------- base de données unique (SQLite)
+# Toutes les sauvegardes (tous les dossiers, toutes les banques) sont dans UN SEUL fichier :
+#   <Documents>/RapprochementBancaire/rapprochement.db   (modifiable avec la variable RAPPROCHEMENT_DB)
+def db_path():
+    p = os.environ.get("RAPPROCHEMENT_DB")
+    if not p:
+        docs = os.path.join(os.path.expanduser("~"), "Documents")
+        base = docs if os.path.isdir(docs) else os.path.expanduser("~")
+        p = os.path.join(base, "RapprochementBancaire", "rapprochement.db")
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    return p
+
+
+def db_connect(path=None):
+    con = sqlite3.connect(path or db_path())
+    con.execute("CREATE TABLE IF NOT EXISTS dossiers (id INTEGER PRIMARY KEY AUTOINCREMENT, nom TEXT NOT NULL, "
+                "au TEXT, maj TEXT NOT NULL, data TEXT NOT NULL)")
+    return con
+
+
+def project_name(project):
+    m = project["accounts"][0]["meta"]
+    return f"{m.get('societe', '').strip() or 'Sans nom'} — au {m.get('au', '')}"
+
+
+def db_save(project, pid=None, path=None):
+    """Enregistre le projet dans la base (création si pid est None). Retourne l'identifiant du dossier."""
+    data = json.dumps(project, ensure_ascii=False)
+    nom, au = project_name(project), project["accounts"][0]["meta"].get("au", "")
+    maj = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with db_connect(path) as con:           # le « with » valide (commit) la transaction
+        if pid is not None and con.execute("SELECT 1 FROM dossiers WHERE id=?", (pid,)).fetchone():
+            con.execute("UPDATE dossiers SET nom=?, au=?, maj=?, data=? WHERE id=?", (nom, au, maj, data, pid))
+            return pid
+        return con.execute("INSERT INTO dossiers (nom, au, maj, data) VALUES (?,?,?,?)", (nom, au, maj, data)).lastrowid
+
+
+def db_list(path=None):
+    """[(id, nom, maj)] du plus récemment modifié au plus ancien."""
+    con = db_connect(path)
+    try:
+        return con.execute("SELECT id, nom, maj FROM dossiers ORDER BY maj DESC, id DESC").fetchall()
+    finally:
+        con.close()
+
+
+def db_load(pid, path=None):
+    con = db_connect(path)
+    try:
+        row = con.execute("SELECT data FROM dossiers WHERE id=?", (pid,)).fetchone()
+    finally:
+        con.close()
+    if not row:
+        raise KeyError(f"Dossier {pid} introuvable dans la base")
+    return _project_from_json(json.loads(row[0]))
+
+
+def db_delete(pid, path=None):
+    with db_connect(path) as con:
+        con.execute("DELETE FROM dossiers WHERE id=?", (pid,))
 
 
 def account_label(state, i=0):

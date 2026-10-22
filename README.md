@@ -28,7 +28,12 @@ Logiciel Windows (.exe) basé sur le classeur *ETAT DE RAPPROCHEMENT BANCAIRE.xl
 - Page *Saisie relevé bancaire* : **Supprimer la sélection** (plusieurs lignes avec Ctrl/Maj + clic) et **Tout effacer** pour vider les lignes reportées.
 - Les soldes reportés se placent en sens miroir : solde comptable en **Débit** ⇔ solde du relevé en **Crédit** (et inversement).
 
-Menu *Fichier* : enregistrer / ouvrir un dossier (.rapp) et **exporter l'état vers Excel** (avec les formules d'origine) pour l'imprimer et le signer.
+## Sauvegarde : une seule base de données
+- **Tout est enregistré automatiquement** (à chaque modification, à la validation et à la fermeture) dans **un seul fichier SQLite** : `Documents\RapprochementBancaire\rapprochement.db`. Menu *Fichier > Emplacement de la base de données…* pour l'afficher (variable d'environnement `RAPPROCHEMENT_DB` pour le déplacer, par ex. sur un disque réseau).
+- Chaque période (mois) est un **dossier** de la base, avec toutes ses banques. *Nouveau (rapprochement suivant)* ajoute le mois suivant **dans la même base** ; l'ancien reste consultable via *Fichier > Ouvrir un dossier de la base…*.
+- Au lancement, le dossier le plus récent est rouvert automatiquement.
+- Les anciens fichiers `.rapp` se récupèrent par *Importer un fichier .rapp dans la base…* ; *Exporter une copie .rapp…* crée une copie de secours.
+- Menu *Fichier* : exporter l'état vers Excel (avec les formules d'origine) pour l'imprimer et le signer.
 
 ## Obtenir le .exe (GitHub)
 1. Créez un dépôt GitHub et poussez ces fichiers (branche `main`).

@@ -140,6 +140,21 @@ class TestCore(unittest.TestCase):
         pr = core.load_project(p)
         self.assertEqual((len(pr["accounts"]), pr["cur"], pr["accounts"][0]["meta"]["banque"]), (1, 0, "BOA"))
 
+    def test_base_de_donnees_unique(self):
+        import tempfile
+        db = os.path.join(tempfile.mkdtemp(), "r.db")
+        p1 = core.new_project(); p1["accounts"][0]["meta"].update(societe="ACME", au="31/01/2026")
+        core.add_account(p1, "CORIS")
+        id1 = core.db_save(p1, None, db)
+        p1["accounts"][0]["gl"].append({"date": "01/01/2026", "lib": "X", "debit": 5, "credit": 0, "pointe": False})
+        self.assertEqual(core.db_save(p1, id1, db), id1)                      # mise à jour, pas de doublon
+        p2 = core.next_project(p1); id2 = core.db_save(p2, None, db)         # 2e dossier, même base
+        self.assertEqual(len(core.db_list(db)), 2)
+        q = core.db_load(id1, db)
+        self.assertEqual((len(q["accounts"]), len(q["accounts"][0]["gl"])), (2, 1))
+        self.assertEqual(core.db_load(id2, db)["accounts"][0]["meta"]["au"], "28/02/2026")
+        core.db_delete(id2, db); self.assertEqual([r[0] for r in core.db_list(db)], [id1])
+
 
 if __name__ == "__main__":
     unittest.main()

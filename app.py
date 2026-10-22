@@ -29,7 +29,7 @@ class Table(tk.Frame):
         super().__init__(master)
         tk.Label(self, text=title, bg=bg, font=BOLD, pady=3).pack(fill="x")
         box = tk.Frame(self); box.pack(fill="both", expand=True)
-        self.tree = ttk.Treeview(box, columns=("d", "o", "db", "cr"), show="headings", height=7, selectmode="none")
+        self.tree = ttk.Treeview(box, columns=("d", "o", "db", "cr"), show="headings", height=4, selectmode="none")
         for c, t, w, a in zip(("d", "o", "db", "cr"), ("Date", "Opérations", "Débit", "Crédit"), self.W, ("center", "w", "e", "e")):
             self.tree.heading(c, text=t); self.tree.column(c, width=w, anchor=a, stretch=(c == "o"))
         sb = ttk.Scrollbar(box, orient="vertical", command=self.tree.yview)
@@ -100,11 +100,12 @@ class Home(ttk.Frame):
             cb = ttk.Combobox(rep, textvariable=s, values=("Débit", "Crédit"), width=7, state="readonly"); cb.grid(row=0, column=3 * i + 2, padx=4)
             self.locks.append((cb, "readonly"))
             m.trace_add("write", lambda *_, k=k: self.edit_rep(k)); s.trace_add("write", lambda *_, k=k: self.edit_rep(k))
-        mid = tk.Frame(self); mid.pack(fill="both", expand=True)
+        mid = tk.Frame(self)
         self.left = Table(mid, "COMPTE BANQUE DANS NOS LIVRES", ORANGE, (BLUE, RED), GREEN, "black")
         self.right = Table(mid, "COMPTE DANS LES LIVRES DE LA BANQUE", YELLOW, (RED, BLUE), PURPLE, "white")
         self.left.pack(side="left", fill="both", expand=True, padx=(0, 4)); self.right.pack(side="left", fill="both", expand=True)
-        bot = tk.Frame(self); bot.pack(fill="x", pady=(8, 0))
+        bot = tk.Frame(self); bot.pack(side="bottom", fill="x", pady=(8, 0))   # toujours visible
+        mid.pack(fill="both", expand=True)
         ctl = tk.Frame(bot, bd=1, relief="solid"); ctl.pack(side="left", anchor="n")
         tk.Label(ctl, text="CONTROLES OBLIGATOIRES", bg=GREY, font=("Algerian", 13, "bold"), padx=8).grid(row=0, column=0, columnspan=2, sticky="ew")
         self.ctl = {}
@@ -192,6 +193,7 @@ class Ledger(ttk.Frame):
         self.q.trace_add("write", lambda *_: self.fill()); self.flt.trace_add("write", lambda *_: self.fill())
         ttk.Label(self, text="Cliquez sur ☐ (ou barre d'espace) pour pointer ; double-clic sur une ligne pour la modifier. Chaque import s'ajoute à la suite des précédents. "
                   "Les écritures NON pointées alimentent « Compte banque dans nos livres ».", foreground="#555", wraplength=1180, justify="left").pack(anchor="w", pady=4)
+        self.info = ttk.Label(self, font=BOLD); self.info.pack(side="bottom", anchor="w", pady=(6, 0))   # toujours visible
         box = ttk.Frame(self); box.pack(fill="both", expand=True)
         self.tree = ttk.Treeview(box, columns=("p", "d", "o", "db", "cr", "s"), show="headings", selectmode="extended")
         for c, t, w, a in (("p", "Pointé", 60, "center"), ("d", "Date", 90, "center"), ("o", "Libellé / Opération", 480, "w"), ("db", "Débit", 120, "e"), ("cr", "Crédit", 120, "e"), ("s", "Import", 190, "w")):
@@ -200,7 +202,6 @@ class Ledger(ttk.Frame):
         self.tree.pack(side="left", fill="both", expand=True); sb.pack(side="right", fill="y")
         self.tree.tag_configure("ok", background=PT_BG); self.tree.tag_configure("susp", background=SUSP_BG); self.tree.tag_configure("lock", background=LOCK_BG)
         self.tree.bind("<Button-1>", self.on_click); self.tree.bind("<Double-1>", self.on_dbl); self.tree.bind("<space>", lambda e: self.toggle(self.tree.selection())); self.tree.bind("<Delete>", lambda e: self.delete_lines())
-        self.info = ttk.Label(self, font=BOLD); self.info.pack(anchor="w", pady=(6, 0))
 
     def on_click(self, e):
         if self.tree.identify_region(e.x, e.y) == "cell" and self.tree.identify_column(e.x) == "#1":
@@ -328,6 +329,11 @@ class Bank(ttk.Frame):
             if k == "date": self.e_date = e
         self.btn = ttk.Button(f, text="Ajouter", command=self.save); self.btn.grid(row=0, column=8, padx=(12, 2))
         ttk.Button(f, text="Nouveau", command=self.reset).grid(row=0, column=9)
+        bar = ttk.Frame(self); bar.pack(side="bottom", fill="x", pady=(6, 0))
+        ttk.Button(bar, text="Supprimer la sélection", command=self.delete).pack(side="left")
+        ttk.Button(bar, text="Tout effacer", command=self.clear_all).pack(side="left", padx=6)
+        ttk.Label(bar, text="(Ctrl/Maj + clic pour sélectionner plusieurs lignes)", foreground="#555").pack(side="left", padx=6)
+        self.info = ttk.Label(bar, font=BOLD); self.info.pack(side="right")
         box = ttk.Frame(self); box.pack(fill="both", expand=True)
         self.tree = ttk.Treeview(box, columns=("d", "o", "db", "cr"), show="headings", selectmode="extended")
         for c, t, w, a in (("d", "Date", 90, "center"), ("o", "Opération", 520, "w"), ("db", "Débit", 130, "e"), ("cr", "Crédit", 130, "e")):
@@ -335,11 +341,6 @@ class Bank(ttk.Frame):
         sb = ttk.Scrollbar(box, orient="vertical", command=self.tree.yview); self.tree.configure(yscrollcommand=sb.set)
         self.tree.pack(side="left", fill="both", expand=True); sb.pack(side="right", fill="y")
         self.tree.bind("<<TreeviewSelect>>", self.on_select); self.tree.bind("<Delete>", lambda e: self.delete())
-        bar = ttk.Frame(self); bar.pack(fill="x", pady=(6, 0))
-        ttk.Button(bar, text="Supprimer la sélection", command=self.delete).pack(side="left")
-        ttk.Button(bar, text="Tout effacer", command=self.clear_all).pack(side="left", padx=6)
-        ttk.Label(bar, text="(Ctrl/Maj + clic pour sélectionner plusieurs lignes)", foreground="#555").pack(side="left", padx=6)
-        self.info = ttk.Label(bar, font=BOLD); self.info.pack(side="right")
 
     def reset(self):
         self.edit = None; self.btn.config(text="Ajouter")
@@ -406,12 +407,17 @@ class Bank(ttk.Frame):
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.geometry("1280x820"); self.minsize(1100, 700)
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        self.geometry(f"{min(1280, sw - 20)}x{min(820, sh - 90)}+5+5"); self.minsize(820, 520)
+        try:
+            self.wm_state("zoomed")         # plein écran (Windows)
+        except tk.TclError:
+            pass
         st = ttk.Style(self); st.theme_use("clam")
         st.configure("Treeview", font=FONT, rowheight=22); st.configure("Treeview.Heading", font=("Arial", 11, "bold"))
         st.configure("TNotebook.Tab", font=("Arial", 10, "bold"), padding=(14, 6)); st.configure("TLabel", font=FONT)
         st.map("TNotebook.Tab", background=[("selected", ORANGE)])
-        self.project, self.path, self.dirty = core.new_project(), None, False
+        self.project, self.pid, self.dirty, self._save_job = core.new_project(), None, False, None
         self.banners = []
         bar = ttk.Frame(self, padding=(8, 6)); bar.pack(fill="x")
         ttk.Label(bar, text="Banque / compte :", font=BOLD).pack(side="left")
@@ -426,8 +432,10 @@ class App(tk.Tk):
         self.nb.add(self.home, text="Page d'accueil"); self.nb.add(self.ledger, text="Import du grand livre banque"); self.nb.add(self.bank, text="Saisie relevé bancaire non pointé")
         self.nb.bind("<<NotebookTabChanged>>", lambda e: self.home.refresh())
         m = tk.Menu(self); f = tk.Menu(m, tearoff=0); self.config(menu=m); m.add_cascade(label="Fichier", menu=f)
-        for lab, cmd, acc in (("Nouveau", self.new, "<Control-n>"), ("Ouvrir…", self.open, "<Control-o>"), ("Enregistrer", self.save, "<Control-s>"),
-                              ("Enregistrer sous…", lambda: self.save(True), None), ("Imprimer l'état…", self.print_etat, "<Control-p>"),
+        for lab, cmd, acc in (("Nouveau dossier", self.new, "<Control-n>"), ("Ouvrir un dossier de la base…", self.open, "<Control-o>"), ("Enregistrer maintenant", self.save, "<Control-s>"),
+                              ("Supprimer ce dossier de la base…", self.delete_dossier, None),
+                              ("Importer un fichier .rapp dans la base…", self.import_rapp, None), ("Exporter une copie .rapp…", self.export_rapp, None),
+                              ("Emplacement de la base de données…", self.show_db, None), ("Imprimer l'état…", self.print_etat, "<Control-p>"),
                               ("Imprimer tous les états (toutes les banques)…", lambda: self.print_etat(True), None),
                               ("Exporter l'état vers Excel (toutes les banques)…", self.export, "<Control-e>"), ("Modèle d'importation du grand livre…", self.export_template, None)):
             f.add_command(label=lab, command=cmd, accelerator=acc.replace("<Control-", "Ctrl+").strip(">").upper() if acc else None)
@@ -442,7 +450,7 @@ class App(tk.Tk):
         r.add_separator()
         r.add_command(label="Ajouter une banque…", command=self.add_account)
         r.add_command(label="Récapitulatif des banques…", command=self.show_summary)
-        self.protocol("WM_DELETE_WINDOW", self.on_close); self.reload()
+        self.protocol("WM_DELETE_WINDOW", self.on_close); self.open_last()
 
     # -- comptes bancaires
     @property
@@ -540,8 +548,8 @@ class App(tk.Tk):
                 return
             core.set_password(self.state, p); core.share_password(self.project)
         core.lock_state(self.state); self.touch(); self.refresh_lock()
-        messagebox.showinfo("Validé", "Rapprochement validé et verrouillé. Enregistrez maintenant le dossier.")
         self.save()
+        messagebox.showinfo("Validé", "Rapprochement validé, verrouillé et enregistré dans la base de données.")
 
     def unlock(self):
         if not self.locked:
@@ -577,7 +585,8 @@ class App(tk.Tk):
         if not self.confirm():
             return
         n = core.next_project(self.project)
-        self.project, self.path = n, None; self.reload()
+        self.save()                                     # le dossier précédent reste dans la base
+        self.project, self.pid = n, None; self.reload(); self.save(); self.dirty = False; self.update_title()
         detail = "\n".join(f"• {core.account_label(a, i)} : {len(a['gl'])} écriture(s) non pointée(s), {len(a['bank'])} ligne(s) du relevé"
                            for i, a in enumerate(n["accounts"]))
         messagebox.showinfo("Nouvelle période", f"Nouveau dossier créé pour {len(n['accounts'])} banque(s). Reportés :\n{detail}\n\n"
@@ -607,39 +616,99 @@ class App(tk.Tk):
 
     def touch(self):
         self.dirty = True; self.update_title(); self.refresh_accounts(); self.home.refresh()
+        if self._save_job:
+            self.after_cancel(self._save_job)
+        self._save_job = self.after(700, self.save)        # enregistrement automatique dans la base
 
     def update_title(self):
         n = len(self.project["accounts"]); bk = f" — {core.account_label(self.state, self.project['cur'])}" if n > 1 else ""
-        self.title(f"Rapprochement bancaire — {os.path.basename(self.path) if self.path else 'Sans titre'}{bk}{' *' if self.dirty else ''}{getattr(self, 'title_extra', '')}")
+        self.title(f"Rapprochement bancaire — {core.project_name(self.project)}{bk}{' *' if self.dirty else ''}{getattr(self, 'title_extra', '')}")
 
     def reload(self):
         self.refresh_accounts(); self.home.load(); self.ledger.fill(); self.bank.fill(); self.bank.reset(); self.refresh_lock(); self.dirty = False; self.update_title()
 
     def confirm(self):
-        if not self.dirty:
-            return True
-        r = messagebox.askyesnocancel("Rapprochement", "Enregistrer les modifications ?")
-        return False if r is None else (self.save() if r else True)
+        """Tout est enregistré automatiquement dans la base : on enregistre simplement avant de continuer."""
+        return self.save(quiet=True)
+
+    def open_last(self):
+        """Au démarrage : rouvre le dossier le plus récent de la base, ou en crée un."""
+        try:
+            rows = core.db_list()
+            if rows:
+                self.project, self.pid = core.db_load(rows[0][0]), rows[0][0]
+            else:
+                self.project, self.pid = core.new_project(), None; self.save(quiet=True)
+        except Exception as ex:
+            messagebox.showerror("Base de données", f"Impossible d'ouvrir la base de données :\n{ex}")
+        self.reload()
+
+    def save(self, quiet=False):
+        """Enregistre le dossier dans l'unique base de données."""
+        if self._save_job:
+            self.after_cancel(self._save_job); self._save_job = None
+        try:
+            self.pid = core.db_save(self.project, self.pid)
+        except Exception as ex:
+            messagebox.showerror("Enregistrement impossible", f"La base de données n'a pas pu être écrite :\n{ex}"); return False
+        self.dirty = False; self.update_title(); return True
 
     def new(self):
         if self.confirm():
-            self.project, self.path = core.new_project(), None; self.reload()
+            self.project, self.pid = core.new_project(), None; self.save(quiet=True); self.reload()
 
     def open(self):
+        if not self.confirm():
+            return
+        rows = core.db_list()
+        dlg = tk.Toplevel(self); dlg.title("Ouvrir un dossier"); dlg.transient(self); dlg.grab_set(); dlg.geometry("560x340")
+        lb = tk.Listbox(dlg, font=FONT, activestyle="dotbox"); lb.pack(fill="both", expand=True, padx=8, pady=8)
+        for pid, nom, maj in rows:
+            lb.insert("end", f"{nom}      (modifié le {maj[:16]})")
+        if rows:
+            lb.selection_set(0)
+        def ok(_e=None):
+            sel = lb.curselection()
+            if sel:
+                pid = rows[sel[0]][0]; dlg.destroy()
+                try:
+                    self.project, self.pid = core.db_load(pid), pid; self.reload()
+                except Exception as ex:
+                    messagebox.showerror("Ouverture impossible", str(ex))
+        lb.bind("<Double-Button-1>", ok); lb.bind("<Return>", ok)
+        bt = ttk.Frame(dlg); bt.pack(pady=(0, 8))
+        ttk.Button(bt, text="Ouvrir", command=ok).pack(side="left", padx=4); ttk.Button(bt, text="Annuler", command=dlg.destroy).pack(side="left", padx=4)
+
+    def delete_dossier(self):
+        if not messagebox.askyesno("Supprimer le dossier", f"Supprimer définitivement « {core.project_name(self.project)} » de la base de données ?\n\n"
+                                   "Toutes ses banques, grands livres et pointages seront perdus."):
+            return
+        if self.pid is not None:
+            core.db_delete(self.pid)
+        rows = core.db_list()
+        if rows:
+            self.project, self.pid = core.db_load(rows[0][0]), rows[0][0]
+        else:
+            self.project, self.pid = core.new_project(), None; self.save(quiet=True)
+        self.reload()
+
+    def import_rapp(self):
         p = filedialog.askopenfilename(filetypes=[("Rapprochement", "*.rapp"), ("Tous", "*.*")])
         if p and self.confirm():
             try:
-                self.project, self.path = core.load_project(p), p; self.reload()
+                self.project, self.pid = core.load_project(p), None; self.save(quiet=True); self.reload()
+                messagebox.showinfo("Import", "Le fichier a été copié dans la base de données.")
             except Exception as ex:
-                messagebox.showerror("Ouverture impossible", str(ex))
+                messagebox.showerror("Import impossible", str(ex))
 
-    def save(self, as_new=False):
-        p = self.path
-        if as_new or not p:
-            p = filedialog.asksaveasfilename(defaultextension=".rapp", filetypes=[("Rapprochement", "*.rapp")])
-        if not p:
-            return False
-        core.save_project(self.project, p); self.path, self.dirty = p, False; self.update_title(); return True
+    def export_rapp(self):
+        p = filedialog.asksaveasfilename(defaultextension=".rapp", filetypes=[("Rapprochement", "*.rapp")])
+        if p:
+            core.save_project(self.project, p)
+
+    def show_db(self):
+        messagebox.showinfo("Base de données", "Toutes les sauvegardes sont dans un seul fichier :\n\n" + core.db_path()
+                            + f"\n\n{len(core.db_list())} dossier(s) enregistré(s). Enregistrement automatique à chaque modification.")
 
     def export(self):
         p = filedialog.asksaveasfilename(defaultextension=".xlsx", filetypes=[("Excel", "*.xlsx")], initialfile="ETAT_DE_RAPPROCHEMENT_BANCAIRE.xlsx")
